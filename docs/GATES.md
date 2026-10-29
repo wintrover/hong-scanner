@@ -30,17 +30,26 @@ canonical `main`에서 빌드한 바이너리로 실제 실행한 런이
 | # | gate | command | expected | status |
 |---|---|---|---|---|
 | P0 | 계획 동결(v6.1) | — | 4건 반영 | DONE |
-| P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | PARTIAL |
+| P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | DONE |
 | P2 | 툴체인 핀 | `nim --version` | 2.2.10 | DONE |
 | P3 | VS-1 계약 | `nimble test` | `55 passed, 0 failed`, exit 0 | DONE |
-| P4 | 브랜치/PR | `gh pr view` | PR open, head `feat/vs1` | PENDING |
-| P5 | CI green | `gh pr checks` | `ci` pass | PENDING |
-| P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | direct push rejected, reason recorded | PENDING |
-| P7 | canonical main | `tools/build.sh` → `./hongscanner doctor` | `BUILD OK`, `DOCTOR RESULT=OK` | PENDING |
-| P8 | acceptance replay | `./hongscanner replay` + `verify` | `VERDICT MATCH provenance=OK` | PENDING |
+| P4 | 브랜치/PR | `gh pr view` | PR #1 merged (`cf5a5f6`) | DONE |
+| P5 | CI green | `gh pr checks` | `ci` pass on PR #1 and on main push | DONE |
+| P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
+| P7 | canonical main | `tools/build.sh` → `./hongscanner doctor` | `BUILD OK commit=0e8fa88`, `DOCTOR RESULT=OK` | DONE |
+| P8 | acceptance replay | `./hongscanner replay` + `verify` | `VERDICT MATCH provenance=OK`, exit 0 | DONE |
 | P9 | 실측 데이터 경로 | real session | `VERDICT MATCH provenance=OK` | BLOCKED(G2) |
-| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | PENDING |
+| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(VS-2 live recorder) |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / no-trigger recorded | BLOCKED(G2) |
+
+### Evidence log (2026-10-29)
+
+| gate | observed |
+|---|---|
+| P5 | `ci pass` on PR #1 (push + pull_request), `ci pass` on main pushes `cf5a5f6`, `0e8fa88` |
+| P6 | 6a: `enforce_admins=true`, `strict=true`, `checks=[ci]`, `approvals=0`, `force_push=false`, `deletions=false`; ruleset `26109780` `enforcement=active`, `bypass_actors=[]`. 6b: probe `eb7ac5b` (tree `e404ea3` == `origin/main`) with `ci success` → `git push origin HEAD:main` exit 1, `remote: error: GH013 ... Changes must be made through a pull request`, `refs/heads/main` unchanged at `cf5a5f6` |
+| P7 | `BUILD OK commit=0e8fa88f12e3f2efc250fee043c69dc4867f171c source_ref=main origin_main=0e8fa88... nim=2.2.10`; `GIT clean=true`; `CALENDAR_INDEX=OK files=2`; `DOCTOR RESULT=OK` exit 0 |
+| P8 | `REPLAY OK bars=22 signals=8 frames=24`; `VERDICT MATCH provenance=OK` exit 0; `run.json` `code_commit=0e8fa88`, `source_ref=main`, `dirty=false`, `nim=2.2.10` |
 
 ## Completion Evidence
 
