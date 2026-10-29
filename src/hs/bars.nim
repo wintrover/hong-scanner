@@ -8,6 +8,15 @@
 ##   disagreement between 290 and the calendar window is a *conflict*: the
 ##   tick is excluded and the affected interval is marked degraded. No guess.
 ##   A tick into an already closed bar invalidates the whole run.
+##   Fail-closed (gap contract §5): a gap that is still pending for a symbol
+##   at session_end — that symbol never produced a later frame — invalidates
+##   the whole run: closeAtSessionEnd raises UnresolvedGapError instead of
+##   letting the run pass as OK. Release is per symbol only; one symbol's
+##   frames never release another symbol's gap. A connection-wide gap
+##   (symbol:null) and a symbol-specific gap are distinguished in the error.
+##   Limitation: a connection-wide gap can only mark symbols already seen;
+##   the stream carries no subscription list, so symbols never seen before
+##   the gap cannot be checked at all.
 import std/[strutils, tables, algorithm]
 import hcj, calendars
 
@@ -29,6 +38,7 @@ type
     closed*: bool
 
   LateTickError* = object of CatchableError
+  UnresolvedGapError* = object of CatchableError
 
   SymbolState = object
     started: bool
@@ -41,6 +51,7 @@ type
     volInit: bool
     lastTickSec: int
     pendingGap: bool
+    pendingGlobal: bool     ## pendingGap came from a connection-wide gap
 
   BarsBuilder* = object
     spec*: SessionSpec
@@ -58,9 +69,18 @@ proc initBars*(spec: SessionSpec): BarsBuilder =
 proc spanSec(spec: SessionSpec): int = spec.bars * barSeconds
 
 proc markBad(st: var SymbolState; idx: int) =
+  ## Contract §4: the affected interval is degraded whenever a bar exists for
+  ## it — the open bar, an already-closed bar, or a bar opened later (badIdx).
+  ## No bar is invented for an interval that never gets one.
   if st.started and st.cur.index == idx:
     st.cur.degraded = true
-  elif idx notin st.badIdx:
+    return
+  if st.closed.len > 0:
+    for i in countdown(st.closed.len - 1, 0):
+      if st.closed[i].index == idx:
+        st.closed[i].degraded = true
+        return
+  if idx notin st.badIdx:
     st.badIdx.add(idx)
 
 proc openBar(b: var BarsBuilder; st: var SymbolState; symbol: string; idx: int;
@@ -79,6 +99,7 @@ proc openBar(b: var BarsBuilder; st: var SymbolState; symbol: string; idx: int;
     st.cur.volPartial = true
     st.cur.gapEdge = "after"
     st.pendingGap = false
+    st.pendingGlobal = false
   elif not wasEver:
     st.cur.pos = "first_after_sub"
     st.cur.volPartial = true
@@ -116,6 +137,7 @@ proc applyGap*(b: var BarsBuilder; symbol: string) =
         st.cur.gapEdge = "before"
         st.closeCur(true)
       st.pendingGap = true
+      st.pendingGlobal = true
       b.syms[name] = st
     return
   if symbol notin b.syms:
@@ -127,6 +149,7 @@ proc applyGap*(b: var BarsBuilder; symbol: string) =
     st.cur.gapEdge = "before"
     st.closeCur(true)
   st.pendingGap = true
+  st.pendingGlobal = false
   b.syms[symbol] = st
 
 proc feedTick*(b: var BarsBuilder; symbol: string; tSec: int; price: int64;
@@ -210,11 +233,29 @@ proc closeAtSessionEnd*(b: var BarsBuilder) =
   ## A bar still open at session_end is closed as-is. Only a symbol whose gap
   ## was never resolved (pendingGap) is marked unresolved; a session-wide gap
   ## that this symbol already recovered from must not taint its last bar.
+  ## Fail-closed: a gap still pending here means the symbol's feed was never
+  ## confirmed by its own later frame, so the run must never pass as a
+  ## normal replay result. Symbol-specific and connection-wide origins are
+  ## distinguished in the message; only symbols already seen can be checked.
+  var ownGap, connGap: seq[string]
   for name in b.order:
     var st = b.syms[name]
     if st.started:
       st.closeCur(st.pendingGap)
+    if st.pendingGap:
+      if st.pendingGlobal: connGap.add(name) else: ownGap.add(name)
     b.syms[name] = st
+  if ownGap.len + connGap.len == 0:
+    return
+  ownGap.sort()
+  connGap.sort()
+  var parts: seq[string]
+  if ownGap.len > 0:
+    parts.add("symbol_gap_unresolved=" & ownGap.join(","))
+  if connGap.len > 0:
+    parts.add("connection_gap_unresolved=" & connGap.join(","))
+  raise newException(UnresolvedGapError,
+    "UNRESOLVED_GAP at session_end: " & parts.join(" "))
 
 proc flagReliable*(b: BarsBuilder): bool =
   ## Plan §3.2: abort the round when 290/calendar conflicts exceed 0.5%.

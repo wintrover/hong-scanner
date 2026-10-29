@@ -1,0 +1,296 @@
+name: attest
+
+## Attested release binary — GitHub `main` pushes only.
+##
+## Trigger: `push` to `refs/heads/main`, nothing else. No workflow_dispatch,
+## no pull_request event can produce an attested artifact from this workflow.
+##
+## Guard chain (every step fail-closed: a refusal exits non-zero and nothing
+## is attested or uploaded):
+##   1. event guard  — this run is a push of refs/heads/main;
+##   2. CI gate      — the `ci` workflow (path .github/workflows/ci.yml) must
+##                     have concluded `success` for THIS exact head SHA. The
+##                     GitHub REST API is polled with a deadline; a missing,
+##                     disabled, renamed or non-green ci run refuses the build;
+##   3. exact build  — actions/checkout at github.sha (credentials not
+##                     persisted; the repo is public so the later anonymous
+##                     git fetch works), then tools/ci_build.sh re-verifies
+##                     HEAD == pushed SHA == re-fetched origin/main tip, a
+##                     clean tree (untracked counts, like tools/build.sh) and
+##                     the pinned Nim 2.2.10;
+##   4. test gate    — `nimble test` runs again on the exact bits about to be
+##                     attested, in this same job, so artifact and test
+##                     evidence cannot diverge;
+##   5. binary check — doctor must report BUILD/GIT lines that match the
+##                     runner's real git state, and selftest must pass on the
+##                     committed fixture. No user data (calendars, runs) is
+##                     needed or read.
+##
+## Path invariant: exactly one binary path exists in this job,
+## <CI_BUILD_OUT>/hongscanner, created once by tools/ci_build.sh and used
+## identically by every consumer — doctor, selftest, the attestation subject,
+## the checksum, the build report and the artifact uploads. CI_BUILD_OUT is a
+## unique empty directory under RUNNER_TEMP, created once by mktemp(1) and
+## exported once through GITHUB_ENV and the `builddir` step output; staging
+## asserts both channels carry the same path. Nothing in this job writes
+## inside the repository checkout (the only in-repo writes are the repo's own
+## gitignored `nimble test` outputs, identical to the ci workflow), and no
+## existing file anywhere is ever overwritten — so a local canonical
+## repo-root ./hongscanner can never be clobbered, and no test artifact can
+## be mistaken for the attested binary.
+##
+## Then actions/attest-build-provenance signs a SLSA provenance statement for
+## the binary with this job's OIDC identity and records it on this repository
+## (digest <-> repo <-> exact main SHA <-> this run). The binary, its sha256,
+## the attestation bundle and a build report are retained as artifacts.
+##
+## Why not `workflow_run`: it fires for every completed run of `ci` (including
+## fork pull_request runs, needing extra guards) and its `github.sha` is the
+## default-branch tip at fire time, which can drift from the ci run's SHA.
+## Polling the runs API from the push event keeps the triggering SHA, the
+## build checkout and the re-fetched main tip provably identical.
+##
+## Trust limits (docs/LIMITS.md "bounded trust" applies unchanged):
+##   - Runner: shared, ephemeral, GitHub-hosted (Microsoft) VM. Trusted GitHub
+##     infrastructure, nothing stronger; this attestation is not independent
+##     of GitHub.
+##   - Admin root: this file, tools/ci_build.sh, the ci workflow and branch
+##     protection are editable by repo admins, so GitHub cannot prevent an
+##     admin from weakening these gates. Attestation raises the evidence bar;
+##     it does not remove the admin trust root.
+##   - `provenance=OK` inside the binary stays self-reported metadata. What
+##     the attestation adds is a GitHub-signed binding of the binary digest
+##     to this repository, the exact main SHA and this workflow run.
+##   - External actions are pinned to full commit SHAs resolved from
+##     api.github.com on 2026-10-29 (lightweight tags -> commits):
+##       actions/checkout               v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
+##       jiro4989/setup-nim-action      v2.3.1  189b145833368cc92f1e7b3e166a25a3e057a693
+##       actions/attest-build-provenance v4.2.2 4d101475d8b20a2381f78447822ac1eab6504dd8
+##       actions/upload-artifact        v7.0.2  cf430e030ddbb5b0abf93d22962f4752f3646cd9
+##     Their internals still execute inside this job and remain trusted code.
+##   - The CI gate reads this public repository's Actions data with the job
+##     token (contents: read only; the REST docs allow the workflow-runs
+##     endpoint without authentication for public resources, so `actions:
+##     read` is deliberately NOT granted today). If the repo ever turns
+##     private, that call fails closed; the fix then is to add `actions: read`
+##     to this job's permissions.
+##   - Artifacts are retained 90 days (the public-repository cap). The
+##     repository attestations and the digests in the build report outlive
+##     them; `gh attestation verify` re-checks anytime.
+##   - ubuntu-latest floats: the exact kernel/glibc is recorded in the build
+##     report, and the sha256 + attestation pin the exact bytes regardless.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  attest:
+    name: attested release binary (main push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Guard - this run must be a push of refs/heads/main (fail-closed)
+        run: |
+          set -euo pipefail
+          [ "${GITHUB_EVENT_NAME}" = "push" ] || { echo "REFUSED: event_name=${GITHUB_EVENT_NAME}" >&2; exit 1; }
+          [ "${GITHUB_REF}" = "refs/heads/main" ] || { echo "REFUSED: ref=${GITHUB_REF}" >&2; exit 1; }
+          echo "GUARD OK event=push ref=refs/heads/main sha=${EXPECTED_SHA}"
+
+      - name: CI gate - workflow 'ci' must conclude success on this exact SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          limit=$((20 * 60))
+          deadline=$((SECONDS + limit))
+          fail_streak=0
+          while :; do
+            resp=""
+            if ! resp="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${EXPECTED_SHA}&event=push&per_page=20" 2>&1)"; then
+              fail_streak=$((fail_streak + 1))
+              echo "warn: gh api failed (attempt ${fail_streak}): ${resp}" >&2
+              if [ "$fail_streak" -ge 10 ]; then
+                echo "CI GATE FAIL: gh api failed ${fail_streak} consecutive times; refusing to attest" >&2
+                exit 1
+              fi
+            else
+              fail_streak=0
+              run_json="$(printf '%s' "$resp" | jq -c '
+                [.workflow_runs[]
+                 | select(.path == ".github/workflows/ci.yml"
+                          and .event == "push"
+                          and .head_branch == "main"
+                          and .status == "completed")]
+                | first // empty')"
+              if [ -n "$run_json" ]; then
+                conclusion="$(printf '%s' "$run_json" | jq -r '.conclusion')"
+                html_url="$(printf '%s' "$run_json" | jq -r '.html_url')"
+                echo "ci run for ${EXPECTED_SHA}: ${html_url} -> status=completed conclusion=${conclusion}"
+                if [ "$conclusion" = "success" ]; then
+                  echo "CI GATE PASS: workflow 'ci' concluded success on the exact pushed SHA"
+                  echo "CI_RUN_URL=${html_url}" >> "$GITHUB_ENV"
+                  exit 0
+                fi
+                echo "CI GATE FAIL: ci conclusion='${conclusion}' (expected 'success') for ${EXPECTED_SHA}; refusing to attest" >&2
+                exit 1
+              fi
+              echo "ci push run for ${EXPECTED_SHA} not completed yet; polling every 15s (elapsed ${SECONDS}s / limit ${limit}s)"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "CI GATE FAIL: no completed 'ci' push run for ${EXPECTED_SHA} within ${limit}s (ci.yml disabled/renamed/never triggered?); refusing to attest" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Checkout the exact pushed main SHA (credentials not persisted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          # fetch-depth defaults to 1; tools/ci_build.sh fetches main itself.
+
+      - name: Install Nim 2.2.10 outside the workspace (keeps the tree clean)
+        uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2.3.1
+        with:
+          nim-version: '2.2.10'
+          parent-nim-install-directory: ${{ runner.temp }}
+
+      - name: Test gate - full contract suite on the exact bits to be attested
+        run: nimble test
+
+      - name: Create the isolated build output dir under RUNNER_TEMP (never in the repo)
+        id: builddir
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d "${RUNNER_TEMP}/hs-ci-build.XXXXXXXX")"
+          echo "CI_BUILD_OUT=${out}" >> "$GITHUB_ENV"
+          echo "out=${out}" >> "$GITHUB_OUTPUT"
+          echo "CI_BUILD_OUT=${out}"
+
+      - name: Separate CI build into CI_BUILD_OUT with tools/build.sh-equivalent guards
+        env:
+          CI_BUILD_SHA: ${{ github.sha }}
+          CI_BUILD_REF: main
+        run: bash tools/ci_build.sh
+
+      - name: Verify the binary's provenance claims against the runner git state
+        run: |
+          set -euo pipefail
+          bin="${CI_BUILD_OUT}/hongscanner"
+          [ -x "$bin" ] || { echo "REFUSED: ${bin} is missing" >&2; exit 1; }
+          out="$("$bin" doctor || true)"
+          printf '%s\n' "$out"
+          # Calendar json files are user data and never committed, so doctor
+          # can only reach DEGRADED calendar (exit 3) on a CI checkout. The
+          # BUILD/GIT lines are what must hold for an attested binary.
+          printf '%s\n' "$out" | grep -F "BUILD commit=${EXPECTED_SHA} source_ref=main origin_main=${EXPECTED_SHA} dirty=false nim=2.2.10"
+          printf '%s\n' "$out" | grep -F "GIT head=${EXPECTED_SHA} origin_main=${EXPECTED_SHA} clean=true"
+          if printf '%s\n' "$out" | grep -Eq 'BUILD=NOT_CANONICAL|BUILD=STALE|GIT=(NOT_CANONICAL_MAIN|DIRTY_TREE|UNKNOWN)'; then
+            echo "REFUSED: doctor reports a degraded build environment" >&2
+            exit 1
+          fi
+
+      - name: Smoke-run the binary on the committed fixture (no user data)
+        run: |
+          set -euo pipefail
+          bin="${CI_BUILD_OUT}/hongscanner"
+          [ -x "$bin" ] || { echo "REFUSED: ${bin} is missing" >&2; exit 1; }
+          out="$("$bin" selftest)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'SELFTEST bytes=OK bars=22 signals=8'
+          # 'SELFTEST provenance=NOT_CANONICAL' is expected even here: the
+          # smoke run deliberately records fixture provenance
+          # (tests/test_cli_contract.sh asserts the same for dev builds).
+
+      - name: Determine platform tag for artifact naming
+        id: platform
+        run: |
+          set -euo pipefail
+          m="$(uname -m)"
+          case "$m" in
+            x86_64) tag=amd64 ;;
+            aarch64|arm64) tag=arm64 ;;
+            *) tag="$m" ;;
+          esac
+          echo "tag=linux-${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the binary (SLSA build provenance, OIDC-signed)
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.builddir.outputs.out }}/hongscanner
+          subject-name: hongscanner-${{ steps.platform.outputs.tag }}
+
+      - name: Stage checksums, attestation bundle and build report in CI_BUILD_OUT
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          PLATFORM_TAG: ${{ steps.platform.outputs.tag }}
+          OUT_DECLARED: ${{ steps.builddir.outputs.out }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CI_BUILD_OUT" ] || [ "$CI_BUILD_OUT" != "$OUT_DECLARED" ]; then
+            echo "REFUSED: path channels diverged: CI_BUILD_OUT='${CI_BUILD_OUT}' builddir.out='${OUT_DECLARED}'" >&2
+            exit 1
+          fi
+          if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
+            echo "REFUSED: attestation bundle missing at '${BUNDLE_PATH}'" >&2
+            exit 1
+          fi
+          if [ -e "${CI_BUILD_OUT}/hongscanner.sha256" ] || [ -e "${CI_BUILD_OUT}/attestation" ]; then
+            echo "REFUSED: refusing to overwrite existing files in ${CI_BUILD_OUT}" >&2
+            exit 1
+          fi
+          ( cd "$CI_BUILD_OUT" && sha256sum hongscanner > hongscanner.sha256 )
+          mkdir "${CI_BUILD_OUT}/attestation"
+          cp "$BUNDLE_PATH" "${CI_BUILD_OUT}/attestation/hongscanner.attestation.bundle.json"
+          digest="$(sha256sum "${CI_BUILD_OUT}/hongscanner" | cut -d' ' -f1)"
+          {
+            echo "hongscanner attested release build"
+            echo "subject name:    hongscanner-${PLATFORM_TAG}"
+            echo "subject digest:  sha256:${digest}"
+            echo "built binary:    ${CI_BUILD_OUT}/hongscanner (isolated runner-temp dir)"
+            echo "main sha:        ${EXPECTED_SHA} (HEAD == re-fetched origin/main, tools/ci_build.sh)"
+            echo "commit:          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${EXPECTED_SHA}"
+            echo "workflow run:    ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "ci gate:         workflow 'ci' success on ${EXPECTED_SHA}: ${CI_RUN_URL:-<unrecorded>}"
+            echo "event/ref:       ${GITHUB_EVENT_NAME} / ${GITHUB_REF}"
+            echo "runner:          ${RUNNER_NAME} $(uname -srm)"
+            echo "glibc:           $(ldd --version | head -1)"
+            echo "nim:             $(nim --version | head -1)"
+            echo "binary sha256:   ${digest}  hongscanner"
+            echo "attestation id:  ${ATTESTATION_ID:-}"
+            echo "attestation url: ${ATTESTATION_URL:-}"
+            echo "verify later:    gh attestation verify hongscanner --repo ${GITHUB_REPOSITORY}"
+          } > "${CI_BUILD_OUT}/attestation/build-report.txt"
+          cat "${CI_BUILD_OUT}/attestation/build-report.txt"
+
+      - name: Upload attested binary + sha256 (90 days, public-repo cap)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hongscanner-${{ steps.platform.outputs.tag }}
+          path: |
+            ${{ steps.builddir.outputs.out }}/hongscanner
+            ${{ steps.builddir.outputs.out }}/hongscanner.sha256
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload attestation bundle + build report (90 days, public-repo cap)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hongscanner-${{ steps.platform.outputs.tag }}-attestation
+          path: ${{ steps.builddir.outputs.out }}/attestation/
+          retention-days: 90
+          if-no-files-found: error

@@ -2,7 +2,7 @@
 ## Exit codes are the contract (docs/REPLAY_CONTRACT.md):
 ##   0 MATCH/OK, 2 contract violation, 3 calendar, 4 INCOMPLETE,
 ##   5 INVALID run, 6 artifact mismatch, 7 invalid provenance.
-import std/[strutils, os, osproc]
+import std/[strutils, os, osproc, tempfiles]
 import hs/[hcj, records, calendars, bars, engine, replay, verify, digest, binfo]
 
 const usageText = """hongscanner <command>
@@ -14,7 +14,7 @@ const usageText = """hongscanner <command>
   doctor                        environment, calendar and build checks
 """
 
-proc fail(code: int; msg: string) =
+proc fail(code: int; msg: string) {.noreturn.} =
   stderr.writeLine(msg)
   quit(code)
 
@@ -48,10 +48,16 @@ proc cmdReplay(input, outDir: string): int =
     fail(2, "REPLAY REJECT: " & e.msg)
   except LateTickError as e:
     fail(5, "REPLAY INVALID: " & e.msg)
+  except UnresolvedGapError as e:
+    fail(4, "REPLAY INCOMPLETE: " & e.msg)
   except CoverageError as e:
     fail(3, "REPLAY REJECT: " & e.msg)
   except AlignError as e:
     fail(3, "REPLAY REJECT: " & e.msg)
+  except OutputGuardError as e:
+    fail(2, "REPLAY REFUSED: " & e.msg)
+  except IOError, OSError:
+    fail(2, "REPLAY REFUSED: " & getCurrentExceptionMsg())
 
 proc cmdVerify(runDir: string): int =
   if runDir.len == 0 or not dirExists(runDir):
@@ -66,24 +72,45 @@ proc cmdSelftest(): int =
   let fixture = "fixtures/smoke/input.hcj.jsonl"
   if not fileExists(fixture):
     fail(2, "selftest fixture missing: " & fixture)
-  let tmp = getTempDir() / "hongscanner-selftest"
-  if dirExists(tmp): removeDir(tmp)
-  let recs = loadRecords(fixture)
-  let res = runCore(recs)
-  if res.status != rsOk:
-    fail(4, "selftest replay did not complete")
-  let fixtureInfo = BuildInfo(codeCommit: "fixture", sourceRef: "main",
-    originMainSha: "fixture", dirty: false, nimVersion: NimVersion,
-    buildTime: "fixture")
-  discard writeRun(tmp, fixture, res, fixtureInfo)
-  let v = verifyRun(tmp, fixtureInfo)
-  if not v.matched:
-    for issue in v.issues: stderr.writeLine("  issue: " & issue)
-    fail(exitCode(v.verdict), "SELFTEST FAILED: " & verdictLine(v))
-  echo "SELFTEST bytes=OK bars=", res.bars.len, " signals=", res.signals.len
-  let real = verifyRun(tmp, buildInfo)
-  echo "SELFTEST provenance=", (if real.matched: "OK" else: "NOT_CANONICAL")
-  0
+  # Unique, exclusively created scratch dir: a fixed predictable path plus
+  # removeDir would follow a pre-planted symlink and destroy foreign data.
+  let tmp = createTempDir("hongscanner-selftest-", "")
+  defer: removeDir(tmp)
+  try:
+    let recs = loadRecords(fixture)
+    let res = runCore(recs)
+    case res.status
+    of rsIncomplete:
+      fail(4, "selftest replay did not complete")
+    of rsUnreliableFlag:
+      fail(5, "SELFTEST INVALID: SESSION_FLAG_UNRELIABLE " &
+              $res.conflicts & "/" & $res.frames)
+    of rsOk:
+      discard
+    let fixtureInfo = BuildInfo(codeCommit: "fixture", sourceRef: "main",
+      originMainSha: "fixture", dirty: false, nimVersion: NimVersion,
+      buildTime: "fixture")
+    discard writeRun(tmp, fixture, res, fixtureInfo)
+    let v = verifyRun(tmp, fixtureInfo)
+    if not v.matched:
+      for issue in v.issues: stderr.writeLine("  issue: " & issue)
+      fail(exitCode(v.verdict), "SELFTEST FAILED: " & verdictLine(v))
+    echo "SELFTEST bytes=OK bars=", res.bars.len, " signals=", res.signals.len
+    let real = verifyRun(tmp, buildInfo)
+    echo "SELFTEST provenance=", (if real.matched: "OK" else: "NOT_CANONICAL")
+    0
+  except RecordError as e:
+    fail(2, "SELFTEST REJECT: " & e.msg)
+  except HcjError as e:
+    fail(2, "SELFTEST REJECT: " & e.msg)
+  except LateTickError as e:
+    fail(5, "SELFTEST INVALID: " & e.msg)
+  except UnresolvedGapError as e:
+    fail(4, "SELFTEST INCOMPLETE: " & e.msg)
+  except CoverageError as e:
+    fail(3, "SELFTEST REJECT: " & e.msg)
+  except AlignError as e:
+    fail(3, "SELFTEST REJECT: " & e.msg)
 
 proc gitLine(args: string): string =
   let (outp, code) = execCmdEx("git " & args)
@@ -91,7 +118,8 @@ proc gitLine(args: string): string =
   outp.strip()
 
 proc cmdDoctor(): int =
-  var problems = 0
+  var buildProblems = 0
+  var calProblems = 0
   echo "BUILD commit=", buildInfo.codeCommit, " source_ref=", buildInfo.sourceRef,
        " origin_main=", buildInfo.originMainSha, " dirty=", buildInfo.dirty,
        " nim=", buildInfo.nimVersion
@@ -103,48 +131,61 @@ proc cmdDoctor(): int =
   echo "GIT head=", head, " origin_main=", originMain,
        " clean=", (porcelain.len == 0)
   if head.len == 0 or originMain.len == 0:
-    echo "GIT=UNKNOWN"; inc problems
+    echo "GIT=UNKNOWN"; inc buildProblems
   elif head != originMain:
-    echo "GIT=NOT_CANONICAL_MAIN"; inc problems
+    echo "GIT=NOT_CANONICAL_MAIN"; inc buildProblems
   if porcelain.len != 0:
-    echo "GIT=DIRTY_TREE"; inc problems
+    echo "GIT=DIRTY_TREE"; inc buildProblems
   if buildInfo.dirty or buildInfo.codeCommit == "dev":
-    echo "BUILD=NOT_CANONICAL"; inc problems
+    echo "BUILD=NOT_CANONICAL"; inc buildProblems
   elif buildInfo.codeCommit != head:
-    echo "BUILD=STALE"; inc problems
+    echo "BUILD=STALE"; inc buildProblems
 
   var indexOk = true
   var calFiles: seq[string]
   let indexPath = "calendars" / "CALENDAR_INDEX.sha256"
   if fileExists(indexPath):
-    for line in readHcjTextLines(indexPath):
-      let parts = line.splitWhitespace()
-      if parts.len != 2: indexOk = false; continue
-      if not fileExists(parts[1]) or sha256Hex(readFile(parts[1])) != parts[0]:
-        indexOk = false
-      calFiles.add(parts[1])
-    echo "CALENDAR_INDEX=", (if indexOk: "OK" else: "MISMATCH"),
-         " files=", calFiles.len
-    if not indexOk: inc problems
+    var indexLines: seq[string]
+    try:
+      indexLines = readHcjTextLines(indexPath)
+    except CatchableError as e:
+      indexOk = false
+      echo "CALENDAR_INDEX=UNREADABLE: ", e.msg
+    if indexOk and indexLines.len == 0:
+      indexOk = false
+      echo "CALENDAR_INDEX=EMPTY files=0"
+    elif indexOk:
+      for line in indexLines:
+        let parts = line.splitWhitespace()
+        if parts.len != 2: indexOk = false; continue
+        if not fileExists(parts[1]) or sha256Hex(readFile(parts[1])) != parts[0]:
+          indexOk = false
+        calFiles.add(parts[1])
+      echo "CALENDAR_INDEX=", (if indexOk: "OK" else: "MISMATCH"),
+           " files=", calFiles.len
+    if not indexOk: inc calProblems
   else:
-    echo "CALENDAR_INDEX=MISSING"; inc problems
+    echo "CALENDAR_INDEX=MISSING"; inc calProblems
 
   for path in walkFiles("calendars/*.json"):
     try:
       let cal = readDocFile(path)
       let (first, last) = firstLast(cal)
-      var trading = 0
-      for d in dayKeys(cal):
-        if isTradingDay(cal, d): inc trading
-      echo "CALENDAR ", path, " coverage=", first, "..", last,
-           " trading_days=", trading
-    except HcjError as e:
-      echo "CALENDAR ", path, " UNREADABLE: ", e.msg; inc problems
+      if first.len == 0:
+        echo "CALENDAR ", path, " EMPTY: no days"; inc calProblems
+      else:
+        var trading = 0
+        for d in dayKeys(cal):
+          if isTradingDay(cal, d): inc trading
+        echo "CALENDAR ", path, " coverage=", first, "..", last,
+             " trading_days=", trading
+    except CatchableError as e:
+      echo "CALENDAR ", path, " UNREADABLE: ", e.msg; inc calProblems
 
-  if problems == 0:
+  if buildProblems == 0 and calProblems == 0:
     echo "DOCTOR RESULT=OK"
     return 0
-  if not indexOk:
+  if calProblems > 0:
     echo "DOCTOR RESULT=DEGRADED calendar"
     return 3
   echo "DOCTOR RESULT=DEGRADED build"

@@ -1,6 +1,6 @@
 ## VS-1 contract tests. Synthetic inputs only: no network, no real market
 ## data, no wall clock. Run: nimble test
-import std/[os, strutils, tables]
+import std/[os, strutils, tables, tempfiles]
 import hs/[hcj, digest, records, calendars, bars, engine, replay, verify, binfo]
 
 var failures = 0
@@ -26,9 +26,7 @@ proc joinLines(lines: seq[string]): string =
   for l in lines: result.add(l & "\n")
 
 proc workDir(name: string): string =
-  result = getTempDir() / ("hs-test-" & name)
-  if dirExists(result): removeDir(result)
-  createDir(result)
+  createTempDir("hs-test-" & name & "-", "")
 
 proc materialize(dir, name: string; lines: seq[string]): string =
   result = dir / name
@@ -179,11 +177,11 @@ block baseReplay:
   check("base replay yields 22 bars", res.bars.len == 22)
   var got: seq[string]
   for s in res.signals: got.add(s.symbol & "/" & $s.barIndex & "/" & s.signal)
-  check("base signals are exactly the tuned set", got.join(",") ==
-    "000660/0/SIGNAL_HELD,000660/4/bearish_rebound_failure," &
-    "000660/5/bearish_rebound_failure,000660/9/bearish_rebound_failure," &
-    "005930/0/SIGNAL_HELD,005930/7/bearish_rebound_failure," &
-    "005930/8/bearish_rebound_failure,005930/9/bullish_pullback_reversal")
+  check("base signals hold unverified bearish decisions", got.join(",") ==
+    "000660/0/SIGNAL_HELD,000660/4/SIGNAL_HELD," &
+    "000660/5/SIGNAL_HELD,000660/9/SIGNAL_HELD," &
+    "005930/0/SIGNAL_HELD,005930/7/SIGNAL_HELD," &
+    "005930/8/SIGNAL_HELD,005930/9/bullish_pullback_reversal")
   check("held bar reports its reason", res.signals[0].reason == "first_after_sub")
   var closedAll = true
   for bar in res.bars:

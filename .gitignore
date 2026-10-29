@@ -1,7 +1,15 @@
 hongscanner
 nimcache/
+build/
 runs/
 calendars/*.json
 !calendars/CALENDAR_INDEX.sha256
 fixtures/kiwoom-doc/
 tests/test_all
+tests/test_bars_contract
+tests/test_engine_contract
+tests/test_input_contract
+tests/test_provenance_contract
+tests/test_recorder_contract
+tests/test_rest_failure_contract
+tests/test_vendor_input
