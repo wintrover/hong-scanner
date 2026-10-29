@@ -33,7 +33,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P0 | 계획 동결(v6.1) | — | 4건 반영 | DONE |
 | P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | DONE |
 | P2 | 툴체인 핀 | `nim --version` | 2.2.10 | DONE |
-| P3 | VS-1 계약 | `nimble test` | 모든 합성 테스트 통과, exit 0 | 이번 변경의 로컬 결과를 별도 확인 |
+| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 이번 변경의 로컬 결과를 별도 확인 |
 | P4 | 브랜치/PR | `gh pr view` | PR #1 merged (`cf5a5f6`) | DONE |
 | P5 | CI green | `gh pr checks` | `ci` pass on PR #1 and on main push | DONE |
 | P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
@@ -58,7 +58,10 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 
 ```bash
 # P3 — synthetic contract
-nimble test
+# `nimble test` alone is NOT the gate: a failed exec in its nimscript task
+# can still exit 0 (this let a red suite pass as a green `ci` check on
+# 2026-10-29, main run 40883550758). The gate is the fail-fast script.
+bash tools/run_tests.sh
 #   all contract suites pass (exit 0)
 
 # P3 — synthetic fixture with a development binary; this is not acceptance

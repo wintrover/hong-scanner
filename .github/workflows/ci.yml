@@ -12,4 +12,6 @@ jobs:
       - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
         with:
           nim-version: '2.2.10'
-      - run: nimble test
+      # Never `nimble test` here: a failed exec in its nimscript task can
+      # still exit 0, which once let a red suite pass as a green check.
+      - run: bash tools/run_tests.sh

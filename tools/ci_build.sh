@@ -73,7 +73,7 @@ if ! origin_url="$(git remote get-url origin 2>/dev/null)"; then
   exit 1
 fi
 case "$origin_url" in
-  *github.com[:/]wintrover/hong-scanner.git) ;;
+  *github.com[:/]wintrover/hong-scanner|*github.com[:/]wintrover/hong-scanner.git) ;;
   *)
     echo "BUILD REFUSED: origin is not wintrover/hong-scanner: $origin_url" >&2
     exit 1
