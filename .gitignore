@@ -3,4 +3,5 @@ nimcache/
 runs/
 calendars/*.json
 !calendars/CALENDAR_INDEX.sha256
-fixtures/kiwoom-doc/tests/test_all
+fixtures/kiwoom-doc/
+tests/test_all
