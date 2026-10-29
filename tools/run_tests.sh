@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+## Full contract suite with a real fail-fast exit code.
+##
+## Why this exists: `nimble test` runs its task's `exec` lines through
+## nimscript, and a failed command raises inside nimble's script runner,
+## which prints "Exception raised during nimble script execution" but the
+## nimble process still exits 0. A red suite therefore passed the required
+## `ci` check on a real main push (2026-10-29, run 40883550758: the build
+## contract suite failed, the check reported success). CI and the
+## attestation test gate run THIS script; the nimble `test` task delegates
+## to it for convenience only -- the gate is the script.
+##
+## Fail-closed: set -e stops at the first failing suite, and every
+## assertion-counting script must itself exit non-zero on any failure.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+run() {
+  echo "=== $* ==="
+  "$@"
+}
+
+run nim c -r --hints:off --warnings:off --path:src tests/test_all.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_engine_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_provenance_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_input_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_bars_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_rest_failure_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_vendor_input.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_recorder_contract.nim
+run bash tests/test_cli_contract.sh
+run bash tests/test_build_contract.sh
+run bash tests/test_install_attested.sh
+run python3 tests/test_calendar_source.py
+
+echo "ALL CONTRACT SUITES PASSED"

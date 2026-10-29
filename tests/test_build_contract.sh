@@ -93,10 +93,13 @@ trap cleanup EXIT
 git clone --quiet "$REPO_ROOT" "$SANDBOX/repo"
 # CI checkouts can be detached; the gate requires branch "main".
 git -C "$SANDBOX/repo" checkout -q -B main
-# Overlay the in-development build files: a clean clone plus local
-# modifications is exactly the dirty state the gate must refuse.
+# Overlay the in-development build files, then make the tree dirt explicit:
+# right after a commit the overlay can be byte-identical to the committed
+# state, so without this the "dirty" fixture would be clean and the build
+# would proceed (this is exactly what failed CI run 40883550758).
 cp "$REPO_ROOT/hongscanner.nimble" "$REPO_ROOT/.gitignore" "$SANDBOX/repo/"
 cp "$REPO_ROOT/tools/build.sh" "$SANDBOX/repo/tools/build.sh"
+printf '\n# dirty-tree contract fixture\n' >> "$SANDBOX/repo/hongscanner.nimble"
 
 # Canary: the root operational binary the build must never touch.
 head -c 4096 /dev/urandom > "$SANDBOX/repo/hongscanner"

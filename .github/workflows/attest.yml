@@ -167,7 +167,7 @@ jobs:
           parent-nim-install-directory: ${{ runner.temp }}
 
       - name: Test gate - full contract suite on the exact bits to be attested
-        run: nimble test
+        run: bash tools/run_tests.sh
 
       - name: Create the isolated build output dir under RUNNER_TEMP (never in the repo)
         id: builddir
