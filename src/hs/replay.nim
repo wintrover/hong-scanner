@@ -113,15 +113,30 @@ proc runCore*(recs: seq[Record]): CoreResult =
       feedTick(b, symbol, tSec, price, vol, flagOf(raw))
     of kGap:
       let raw = recs[i].raw
-      var symbol = ""
-      if raw.kind == hkObj and raw.has("symbol") and not raw.get("symbol").isNull:
-        symbol = raw.get("symbol").asStr
-      applyGap(b, symbol)
+      if raw.kind != hkObj:
+        raise newException(RecordError, "gap raw is not an object")
+      if not raw.has("symbol"):
+        raise newException(RecordError, "gap raw has no symbol field")
+      let sym = raw.get("symbol")
+      if not sym.isNull and sym.kind != hkStr:
+        raise newException(RecordError, "gap symbol is not a string or null")
+      applyGap(b, if sym.isNull: "" else: sym.strVal)
     of kSessionEnd:
+      if not recs[i].raw.isNull:
+        raise newException(RecordError, "session_end raw is not null")
       sawEnd = true
       closeAtSessionEnd(b)
     of kRestResp:
-      discard
+      # Fail-closed placeholder contract. VS-1 has no REST producer and the
+      # live rest_resp wire format is unmeasured (G4: U1/U3), so no payload --
+      # not even a success-shaped one -- can be proven to mean success.
+      # Reject the record instead of discarding it: a discarded failed
+      # attempt would otherwise leave the verdict OK once session_end
+      # arrives. This is not VS-2 candidate selection; the accepted shape is
+      # defined only when a real producer is measured.
+      raise newException(RecordError, "rest_resp at seq " & $recs[i].seq &
+        " is rejected: the REST wire format is unverified (G4), so no " &
+        "rest_resp can be treated as success in VS-1")
     of kCalendar, kConfig:
       discard
     else:

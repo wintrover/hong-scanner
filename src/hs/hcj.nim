@@ -63,11 +63,12 @@ proc hInt*(i: int64): HcjValue =
 proc hInt*(i: int): HcjValue = hInt(i.int64)
 
 proc validateHcjString(s: string, what: string) =
+  ## Checks a decoded string value: DEL and UTF-8 validity (incl. surrogates).
+  ## C0 controls are legal in values; they must be escaped in the text and
+  ## the parser rejects the raw form before the value reaches this check.
   var i = 0
   while i < s.len:
     let b = byte(s[i])
-    if b < 0x20'u8:
-      raise newHcjError("raw control char in " & what)
     if b == 0x7f'u8:
       raise newHcjError("DEL (U+007F) in " & what)
     if b < 0x80'u8:
@@ -387,6 +388,8 @@ proc parseObject(p: var Parser): HcjValue =
     if p.peekChar() != '"':
       raise perr(p, "expected object key string")
     let key = p.parseStringRaw()
+    if key.len == 0:
+      raise perr(p, "empty key in object")
     for b in key.items:
       let c = byte(b)
       let okKey = (c >= 'a'.byte and c <= 'z'.byte) or

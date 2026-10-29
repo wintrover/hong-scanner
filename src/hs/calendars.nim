@@ -1,6 +1,6 @@
 ## Calendar-driven session window. No 09:00/15:30 constant lives in code.
 ## Contract: plan §3.2 (time rules) and §3.5 (trading-day judgement).
-import std/[strutils, algorithm, options]
+import std/[algorithm, options]
 import hcj
 
 type
@@ -15,23 +15,39 @@ type
 
 const barSeconds* = 180
 
+proc twoDigits(s: string; i: int): int =
+  ## Value of the two ASCII digits at s[i], s[i+1]; -1 when either is not.
+  if s[i] >= '0' and s[i] <= '9' and s[i + 1] >= '0' and s[i + 1] <= '9':
+    result = (ord(s[i]) - ord('0')) * 10 + (ord(s[i + 1]) - ord('0'))
+  else:
+    result = -1
+
 proc hmsToSec*(s: string): int =
-  ## "HH:MM:SS+09:00" -> seconds since midnight. Offset must be +09:00.
-  if s.len < 14 or s[8 .. ^1] != "+09:00":
+  ## "HH:MM:SS+09:00" -> seconds since midnight. Offset must be +09:00 and
+  ## each field is exactly two digits: HH 00..23, MM 00..59, SS 00..59.
+  if s.len != 14:
     raise newException(CoverageError, "unsupported timestamp: " & s)
-  let parts = s[0 .. 7].split(':')
-  if parts.len != 3:
+  if s[2] != ':' or s[5] != ':' or s[8 .. ^1] != "+09:00":
+    raise newException(CoverageError, "unsupported timestamp: " & s)
+  let hh = twoDigits(s, 0)
+  let mm = twoDigits(s, 3)
+  let ss = twoDigits(s, 6)
+  if hh < 0 or hh > 23 or mm < 0 or mm > 59 or ss < 0 or ss > 59:
     raise newException(CoverageError, "bad timestamp: " & s)
-  try:
-    result = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2])
-  except ValueError:
-    raise newException(CoverageError, "bad timestamp: " & s)
+  result = hh * 3600 + mm * 60 + ss
+
+proc daysOf*(cal: HcjValue): HcjValue =
+  ## The `days` object of a calendar. A non-object calendar raw is an HCJ
+  ## error (exit 2); a missing or non-object `days` is a calendar error
+  ## (exit 3), like the other malformed-calendar checks below.
+  if cal.kind != hkObj:
+    raise newHcjError("expected object, got " & cal.kindName)
+  if not cal.has("days") or cal.get("days").kind != hkObj:
+    raise newException(CoverageError, "calendar has no days object")
+  result = cal.get("days")
 
 proc dayKeys*(cal: HcjValue): seq[string] =
-  let days = cal.get("days")
-  if days.kind != hkObj:
-    raise newException(CoverageError, "calendar has no days object")
-  for p in days.pairs:
+  for p in daysOf(cal).pairs:
     result.add(p.k)
 
 proc firstLast*(cal: HcjValue): tuple[first, last: string] =
@@ -41,7 +57,7 @@ proc firstLast*(cal: HcjValue): tuple[first, last: string] =
   (ks[0], ks[^1])
 
 proc sessionFor*(cal: HcjValue; date: string): SessionSpec =
-  let days = cal.get("days")
+  let days = daysOf(cal)
   let dayOpt = days.getOpt(date)
   if dayOpt.isNone:
     raise newException(CoverageError, "CALENDAR_COVERAGE_UNKNOWN: " & date)
@@ -50,6 +66,10 @@ proc sessionFor*(cal: HcjValue; date: string): SessionSpec =
     raise newException(CoverageError, "bad day record: " & date)
   if not day.has("open") or day.get("open").isNull:
     raise newException(CoverageError, "not a trading day: " & date)
+  if not day.has("close") or day.get("close").isNull:
+    raise newException(CoverageError, "bad day record: " & date)
+  if day.get("open").kind != hkStr or day.get("close").kind != hkStr:
+    raise newException(CoverageError, "bad day record: " & date)
   let o = hmsToSec(day.get("open").asStr)
   let c = hmsToSec(day.get("close").asStr)
   if c <= o:
@@ -62,8 +82,7 @@ proc sessionFor*(cal: HcjValue; date: string): SessionSpec =
                        bars: span div barSeconds)
 
 proc isTradingDay*(cal: HcjValue; date: string): bool =
-  let days = cal.get("days")
-  let d = days.getOpt(date)
+  let d = daysOf(cal).getOpt(date)
   if d.isNone: return false
   let day = d.get
   day.kind == hkObj and day.has("open") and not day.get("open").isNull

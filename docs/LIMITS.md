@@ -7,20 +7,32 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | `sha256` equality is byte identity, not correctness | a wrong price recorded consistently still matches | G4 |
 | CI uses synthetic fixtures only | CI proves algorithm stability, not market behaviour | PH-1 |
 | `13` (cumulative volume) semantics are unconfirmed | `bar_position` marks suspicion; it does not prove session-cumulative | G4 experiment (REST `acc_trde_qty` vs first `13`) |
-| REST bar timestamps (`ka10080`) are start- or end-stamped — unknown | only our own WS bars use the proven `i(t)` formula | G4 |
+| REST bar timestamp interpretation needs source and live cross-check | the local official extract describes `cntr_tm` as the bar start; alignment with the WS feed is not yet measured | G4 |
 | `290` boundary behaviour at 15:30 is undocumented | conflicts are counted, not resolved | G4 |
 | SIGKILL drills do not prove power-loss durability | page cache survives process death | VS-2 recorder drill |
-| fsync batching (128 records / 1 s) is not implemented in VS-1 | VS-1 has no live recorder | VS-2 |
+| the standalone recorder is not a live collector | it is not wired to transport or the CLI and does not implement periodic fsync | VS-2 |
+| a recorded `session_end` is not proof of durable completion | fsync may fail after the marker is written; approval needs separate completion evidence | VS-2 approval |
 | no WebSocket client exists in VS-1 | handshake, framing, masking, close codes are VS-2 work | VS-2 |
-| strategy validity is not established | the fixture is tuned to exercise both directions, not to be profitable | PH-2 |
+| strategy validity is not established | synthetic fixtures are not evidence of market behavior or profitability | PH-2 |
+| `breakdown_bp` is parsed but not applied | its reference and comparison are undefined, so bearish candidates are held instead of emitted | strategy contract |
+| strategy evidence windows are not a market-validity proof | tainted evidence is held within each algorithm's dependency window, but thresholds and actual vendor field semantics still require validation | PH-1/PH-2 |
+| a late session-flag conflict can degrade a closed bar in batch replay | live emissions need a finality or retraction contract before they are published | VS-2 live output contract |
 | thresholds come from a synthetic fixture | PH-1 calibrates them on a real capture; that same session cannot also prove detection | PH-1/PH-2 |
 | signals == 0 on a real day is not a bug | `NO_TRIGGER_OBSERVED` is a valid outcome | PH-2 |
 | one market (KRX) only | the global goal needs a second adapter and the same acceptance evidence | V2 |
-| `rest_resp` is consumed but ignored in VS-1 | REST failure cannot influence a verdict until VS-2 consumes it | VS-2 |
+| `rest_resp` is rejected in VS-1 | a real attempt cannot be replayed until VS-2 defines and validates its result format | VS-2 |
 | `run.json` is excluded from checksums | determinism covers the three data artifacts only | inherent |
+| `provenance=OK` is self-declared consistency, not independent authenticity | compiler `-d` values and run metadata can be forged together; a match cannot prove the source tree was clean | trusted build and independent attestation design |
+| previous runs require their original executable and calendar | the build gate builds the current main, while the run directory does not preserve the executable | run archive and retention design |
 | the 0.5% conflict threshold is a policy choice | small samples can trip it; it is fail-closed by design | plan §3.2 |
 | manager can still edit branch protection | GitHub cannot prevent a repo admin from changing the rules | P6 audit |
 | Northflank fixed egress IP is unverified | no account in scope; U5 stays open | deployment |
+| provider tick completeness is unverified | a silent feed drop and a quiet market can produce the same stream; `NO_TRIGGER_OBSERVED` speaks only about the observed stream | G2 spot-check (WS bars vs REST `acc_trde_qty`) |
+| the ka10027 page cap is scanner-side | if more pages remain when the cap is reached, they are "not fetched", not "no more candidates" | VS-2 recorder contract |
+| byte evidence excludes TLS, TCP framing and WS control frames | application payloads and non-secret pagination metadata do not expose every transport-level anomaly | VS-2 recorder contract |
+| attestation is not implemented | `provenance=OK` stays self-declared; no installed-file digest is recorded, so the deployed binary cannot be tied to the exact main sha | attestation design |
+| CI green is bounded trust | the workflow file and repo-admin actions sit inside the trust boundary; GitHub Actions cannot attest what is installed on the host | attestation design |
+| strategy intervals and thresholds are held before approval | `warmup`/`lookback` windows and bp thresholds come from a synthetic fixture; signals before the PH-1 freeze are not acceptance evidence | PH-1 |
 
 ## Explicit non-goals
 

@@ -1,14 +1,15 @@
 # Hong Scanner — Replay Contract (VS-1 baseline, v6.1)
 
-This file is the executable contract. Every statement here is enforced by
-`tests/test_all.nim`; if code and this document disagree, the test suite is
-the tiebreaker and one of them must be fixed before a run is accepted.
+This document states the intended VS-1 contract. Tests cover selected cases;
+passing them does not prove every statement or replace review of the actual
+implementation.
 
 ## 1. Purpose
 
 Given the same input stream, the same binary and the same calendar, Core must
 produce byte-identical `bars.hcj.jsonl` and `signals.hcj.jsonl`. Provenance
-then answers a different question: was that binary built from canonical main?
+checks consistency with the binary's self-declared build metadata; it does not
+independently prove that the binary came from canonical main.
 
 ## 2. Input stream
 
@@ -48,8 +49,9 @@ Ignored by Core (three, diagnostic only):
 `ws_conn` describes how a connection changed; `gap` describes which data is
 untrustworthy. They are recorded separately and only `gap` has authority.
 
-`rest_resp` is consumed but not yet used for any verdict in VS-1 (there is no
-REST producer in VS-1). VS-2 candidate selection will consume it.
+Until the REST attempt-result contract and producer are verified, VS-1
+rejects every `rest_resp` rather than treating an unrecognized failure as
+success. VS-2 must replace this rejection with validated attempt handling.
 
 ## 4. Session-class (field 290)
 
@@ -89,14 +91,19 @@ observation of a symbol contributes 0 and marks the bar `vol_partial`.
 `first_after_sub` and `after_gap` are always `vol_partial` and `degraded`.
 
 Bars are closed by the next bar's first frame, by a `gap`, or by
-`session_end`. A tick that belongs to an already closed bar invalidates the
-whole run: `LATE_TICK_INTO_CLOSED_BAR` (exit 5). A backwards tick inside the
-open bar only marks that bar `out_of_order` + `degraded`.
+`session_end`. An in-session tick that belongs to an already closed bar
+invalidates the whole run: `LATE_TICK_INTO_CLOSED_BAR` (exit 5). A backwards
+tick inside the open bar only marks that bar `out_of_order` + `degraded`.
+A conflicting or unknown session flag can currently mark an already-closed
+bar degraded; this batch replay behavior does not establish a live signal
+finality or retraction policy.
 
 A `gap` closes the open bar as `gap_edge:"before"` and makes the next bar of
 **each affected symbol** `after_gap`. A connection-wide gap (`symbol:null`)
-applies to every subscribed symbol; release is per symbol, at that symbol's
-own first later frame. A symbol that never returns stays unresolved.
+marks each previously observed symbol; release is per symbol at that symbol's
+own first later valid frame. An unresolved gap at session end is INCOMPLETE.
+The current input contract does not include a subscription list, so symbols
+that never produced a frame cannot be checked; live approval remains blocked.
 
 ## 6. Signals
 
@@ -104,9 +111,17 @@ Two independent state machines share the same closed bars. There is no
 `short`; the output vocabulary is `bullish_pullback_reversal`,
 `bearish_rebound_failure`, and `SIGNAL_HELD`.
 
-- `SIGNAL_HELD` replaces a verdict on a degraded bar and carries `reason`:
-  `gap`, `empty_gap`, `out_of_order`, `first_after_sub`, `flag_conflict`,
-  `degraded_bar`. Real signals carry `reason:""`.
+- A tainted bar cannot support a verdict. The bullish evidence window spans
+  up to `2*lookback` prior bars; the bearish window spans `lookback` prior
+  bars. A verdict that depends on degraded, partial-volume, empty, out-of-order
+  or gap-marked evidence is held until the affected bar leaves its window.
+  With `hold_on_degraded`, `SIGNAL_HELD` reports the most recent tainted
+  bar's reason; otherwise the verdict is suppressed. Real signals carry
+  `reason:""`.
+- `breakdown_bp` has no approved reference price or comparison rule. A bearish
+  candidate is therefore held with `breakdown_unverified`, never emitted as
+  `bearish_rebound_failure`; evidence-window taint takes precedence. With
+  `hold_on_degraded=false`, this hold is not emitted.
 - Every signal references `(session_date, symbol, bar_index)` present in
   `bars.hcj.jsonl` with `closed:true`. A signal for an open bar is a contract
   violation (exit 2).
@@ -166,7 +181,7 @@ plain `nim c` / `nimble build` keeps the dev marker (`dirty:true`,
 | 0 | `VERDICT MATCH provenance=OK` / command OK |
 | 2 | contract violation (HCJ, record envelope, unknown kind, open-bar signal) |
 | 3 | calendar (`CALENDAR_COVERAGE_UNKNOWN`, `SESSION_NOT_BAR_ALIGNED`) |
-| 4 | `VERDICT INCOMPLETE` (no `session_end`) |
+| 4 | `VERDICT INCOMPLETE` (no `session_end` or unresolved known-symbol gap) |
 | 5 | invalid run (`LATE_TICK_INTO_CLOSED_BAR`, `SESSION_FLAG_UNRELIABLE`) |
 | 6 | artifact mismatch (bytes or checksum manifest differ from replay) |
 | 7 | invalid provenance |
@@ -194,3 +209,68 @@ does not contain market data.
 
 `sha256` is a byte-identity tool. It is not evidence that prices are correct
 (G4) or that the strategy is sound (PH-2).
+
+## 12. Target additions beyond VS-1 (not implemented)
+
+Everything in this section is **target contract**. VS-1 has no live REST or
+WebSocket producer, and Core rejects `rest_resp`. Passing VS-1 proves none
+of the statements below, and none describes current live behavior.
+
+### 12.1 Candidate selection (ka10027)
+
+VS-2 candidate selection declares its query scope so that "candidate" stays
+auditable:
+
+- API: Kiwoom REST `ka10027` (전일대비등락률상위), `POST /api/dostk/rkinfo`.
+- Exchange: `stex_tp="1"` (KRX). `2` (NXT) and `3` (통합) are outside the
+  candidate universe.
+- Direction: one query per direction — `sort_tp="1"` (rise-rate) and
+  `sort_tp="3"` (fall-rate). Direction comes from the query itself, not
+  from a sign convention on thresholds.
+- The remaining body fields (`mrkt_tp`, `trde_qty_cnd`, `stk_cnd`,
+  `crd_cnd`, `updown_incls`, `pric_cnd`, `trde_prica_cnd`) are pinned at
+  approval time and recorded verbatim in the run's config record; before
+  approval no value is fixed.
+- The refresh cadence and candidate time-to-live are explicitly fixed in
+  the approved configuration; until then live candidate decisions are held.
+- Pagination follows the response headers `cont-yn`/`next-key` and is
+  capped by a declared page upper limit. If more pages remain when the cap
+  is reached, the result is `truncated`: those pages are "not fetched",
+  never "no more candidates". The cap is a scanner-side declaration.
+- Each attempt is recorded as a `rest_resp` record that carries the
+  declared request scope and the page index, so replay can audit what was
+  asked for and what came back.
+
+### 12.2 Byte evidence (recorder scope)
+
+The bytes preserved as evidence are exactly:
+
+- REST: the HTTP response **body** bytes.
+- WebSocket: the **application payload** bytes — RFC 6455 application data
+  after de-framing and unmasking — not raw TCP bytes, not the frames, not
+  control frames.
+
+Preserve request metadata, response status, and the non-secret pagination
+headers required to replay candidate selection. Never preserve credentials,
+tokens, Authorization headers, or login payloads; control messages are
+separate from market data. TLS, TCP framing and WS control frames are outside
+the raw evidence scope, so transport-level anomalies require explicit gap
+or failure records rather than inference from the payload alone.
+
+### 12.3 Normalization cross-check
+
+HCJ records are normalized views (`price` int, cumulative `vol` int, `t`
+timestamp). The target contract: every normalized record must be
+re-derivable from the preserved bytes of §12.2, and the recorder checks
+this before the record is accepted; a mismatch aborts the round. No
+cross-check exists today because no producer exists.
+
+### 12.4 `session_end`, approval and `NO_TRIGGER`
+
+- `session_end` (M3) closes the stream and only that. It is not an
+  approval; approval conditions are separate and live in GATES.md.
+- `NO_TRIGGER_OBSERVED` applies only when every run approval condition in
+  GATES.md is met and means "no trigger in the observed stream".
+- Without a verified provider sequence or completeness contract, absence in
+  the stream is not evidence of absence in the market. Tick completeness
+  is not claimed and cannot be verified from the client stream alone.
