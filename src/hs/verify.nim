@@ -10,7 +10,7 @@
 ## O_CREAT|O_EXCL, so a guard-to-write race or a planted symlink can only
 ## end in a refusal, never in a truncated or overwritten file.
 import std/[strutils, os, times, algorithm, options]
-import hcj, records, calendars, bars, engine, replay, digest, binfo
+import hcj, records, calendars, bars, engine, replay, digest, binfo, recorder
 when defined(posix):
   import std/posix
 
@@ -23,6 +23,12 @@ type
     verdict*: Verdict
     issues*: seq[string]
     matched*: bool
+    ## Durable-completion verdict for the input stream's COMMITTED marker
+    ## ("VALID"/"ABSENT"/"INVALID"), "" when the input could not even be
+    ## classified. Reported on the verify output as COMMIT=<state>; enforced
+    ## (see verifyRun) only when the stream's config declares an
+    ## environment.
+    commitState*: string
 
   OutputGuardError* = object of CatchableError
   RunArtifact* = tuple[name, data: string]
@@ -379,6 +385,43 @@ proc provenanceOk(dir: string; recs: seq[Record]; bi: BuildInfo;
     # and can never re-classify the verdict as a contract violation.
     issues.add("run.json provenance check failed: " & e.msg)
 
+proc declaredEnvironment(recs: seq[Record]): string =
+  ## The operating environment the stream's config record declares
+  ## ("demo"/"prod"), "" when undeclared. A malformed config probes as ""
+  ## here on purpose: the core replays the config and reports the real
+  ## failure, so this probe never reclassifies a verdict.
+  if recs.len >= 2 and recs[1].kind == kConfig:
+    try:
+      result = parseConfig(recs[1].raw).environment
+    except CatchableError:
+      discard
+
+proc endsWithoutLf(path: string): bool =
+  ## True when the file's last byte is not LF: a torn tail by the recorder
+  ## contract. Unreadable is false (the caller keeps its own verdict).
+  try:
+    let content = readFile(path)
+    result = content.len > 0 and not content.endsWith("\n")
+  except CatchableError:
+    discard
+
+proc environmentFromRawFile(path: string): string =
+  ## declaredEnvironment for a stream that failed to load as records: the
+  ## first two lines of the raw bytes are still complete LF lines, so the
+  ## config record is still readable from them. "" on any doubt — the
+  ## torn-tail rule must never fire unless the environment is certain.
+  try:
+    let content = readFile(path)
+    let parts = content.split('\n')
+    if parts.len < 3: # need lines 1 and 2 complete (plus the torn fragment)
+      return
+    let cal = parseRecord(parts[0], 1)
+    let cfg = parseRecord(parts[1], 2)
+    if cal.kind == kCalendar and cfg.kind == kConfig:
+      result = parseConfig(cfg.raw).environment
+  except CatchableError:
+    discard
+
 proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
   var recs: seq[Record]
   try:
@@ -386,6 +429,21 @@ proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
   except HcjError as e:
     result.verdict = vContract
     result.issues.add(e.msg)
+    # §12.5 approval coding, torn-tail clause: a stream whose config
+    # declares an environment was produced by the durable recorder
+    # protocol, where a torn tail is a crashed run — INCOMPLETE (exit 4),
+    # never an approval, and never the synthetic-stream REJECT for the
+    # same bytes. Any doubt (the config is not readable from the raw
+    # bytes) stays at the fail-closed classification above.
+    let path = dir / inputFile
+    if endsWithoutLf(path):
+      let env = environmentFromRawFile(path)
+      if env.len > 0:
+        result.verdict = vIncomplete
+        result.issues.add(
+          "input ends mid-record (torn tail): the durable recorder " &
+          "protocol classifies a crashed stream as INCOMPLETE, not " &
+          "REJECT (environment: " & env & ")")
     return
   except RecordError as e:
     result.verdict = vContract
@@ -398,6 +456,13 @@ proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
     result.verdict = vMismatch
     result.issues.add("input artifact unreadable: " & e.msg)
     return
+  # Durable-completion evidence is read before any verdict is produced so
+  # every classified path can report it. Enforcement (below) is keyed to
+  # the stream's declared environment; synthetic streams keep their
+  # verdicts unchanged and only get the marker reported.
+  let commit = readCommitMarker(dir / inputFile)
+  result.commitState = commitStateName(commit.status)
+  let env = declaredEnvironment(recs)
   try:
     let res = runCore(recs)
     case res.status
@@ -411,11 +476,36 @@ proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
       return
     of rsOk:
       discard
+    # Commit gate (§12.5 approval coding): sealed + VALID marker is the
+    # only durable completion a durable-recorder stream (environment
+    # declared) may be approved on. Sealed alone is INCOMPLETE
+    # ("durability unconfirmed"); a marker that disagrees with the log is
+    # REJECT (fail-closed). The stream is sealed here by construction:
+    # rsOk requires the session_end seal.
+    if env.len > 0:
+      if commit.status == csInvalid:
+        result.verdict = vContract
+        result.issues.add("commit marker INVALID: " & commit.reason &
+          " (the stream declares environment " & env &
+          "; completion requires a marker that matches the sealed log)")
+        return
+      if commit.status == csAbsent:
+        result.verdict = vIncomplete
+        result.issues.add(
+          "commit marker absent: the stream is sealed, but durability is " &
+          "unconfirmed — a stream declaring environment " & env &
+          " completes only with a VALID commit marker")
+        return
+    var commitIssues: seq[string]
+    if env.len == 0 and commit.status == csInvalid:
+      # Synthetic stream: no behavior change, marker reported only.
+      commitIssues.add("commit marker INVALID (reported only; the stream " &
+        "declares no environment): " & commit.reason)
     var byteIssues: seq[string]
     artifactsOk(dir, res, byteIssues)
     var provIssues: seq[string]
     provenanceOk(dir, recs, bi, provIssues)
-    result.issues = byteIssues & provIssues
+    result.issues = commitIssues & byteIssues & provIssues
     if byteIssues.len > 0:
       result.verdict = vMismatch
     elif provIssues.len > 0:

@@ -1,4 +1,4 @@
-## Input-contract regression tests for hcj / records / calendars (v6.1).
+## Input-contract regression tests for hcj / records / calendars (v6.2).
 ## Synthetic only: no fixtures, no network, no wall clock.
 ## Run: nim c -r --path:src tests/test_input_contract.nim
 import std/[os, tempfiles]

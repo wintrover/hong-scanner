@@ -1,4 +1,4 @@
-## Engine contract regression (REPLAY_CONTRACT.md §6 Signals, v6.1).
+## Engine contract regression (REPLAY_CONTRACT.md §6 Signals, v6.2).
 ## Synthetic bars only: no fixtures, no network, no clock. Run:
 ##   nim c -r --path:src tests/test_engine_contract.nim
 ##

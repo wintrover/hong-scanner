@@ -2,12 +2,16 @@
 ## No wall clock, no filesystem, no arguments: every input that changes a
 ## verdict is inside input.hcj.jsonl (plan §3.0/§3.1).
 import std/[strutils, algorithm]
-import hcj, records, calendars, bars, engine, rest_resp
+import hcj, records, calendars, bars, engine, rest_resp, sub_input
 
 type
   Config* = object
     sessionDate*: string
     params*: Params
+    ## Optional declared operating environment ("demo"|"prod"; "" when the
+    ## stream declares none). The marker-aware verify rules key on this
+    ## field; a present-but-invalid value is a parse failure (fail-closed).
+    environment*: string
 
   RunStatus* = enum
     rsOk, rsIncomplete, rsUnreliableFlag
@@ -26,6 +30,11 @@ type
     ## no live collector yet, so a verified page never moves the verdict --
     ## bars and signals stay exactly the stream's tick-derived output.
     restVerified*: int
+    ## Subscription-evidence records consumed (schema-validated, §12.5).
+    ## Like restVerified: counted, never moved by them, and they change no
+    ## output byte.
+    subCount*: int
+    wsRawCount*: int
 
 proc intOr(raw: HcjValue; key: string; dflt: int): int =
   if raw.kind == hkObj and raw.has(key) and raw.get(key).kind == hkInt:
@@ -45,6 +54,20 @@ proc parseConfig*(raw: HcjValue): Config =
   if not raw.has("session_date"):
     raise newException(RecordError, "config.session_date is required")
   result.sessionDate = raw.get("session_date").asStr
+  # environment is optional (absent = the stream declares no operating
+  # environment; every existing synthetic stream stays valid). Present,
+  # it is fail-closed: only the string "demo" or "prod" is accepted --
+  # another value or a non-string type is a contract violation, never a
+  # default. The verify commit-marker rules key on this field.
+  if raw.has("environment"):
+    let e = raw.get("environment")
+    if e.kind != hkStr:
+      raise newException(RecordError,
+        "config.environment is not a string: " & kindName(e))
+    if e.strVal != "demo" and e.strVal != "prod":
+      raise newException(RecordError,
+        "config.environment is not demo|prod: " & e.strVal)
+    result.environment = e.strVal
   let p = if raw.has("params"): raw.get("params") else: hNull()
   result.params = Params(
     lookback: intOr(p, "lookback", 3),
@@ -109,6 +132,15 @@ proc restRejection(seqNo: int; detail: string): string =
   "unverified by a measured producer (G2/G4), so no unconfirmed state can " &
   "mean success)"
 
+proc schemaRejection(kindNameText: string; seqNo: int; detail: string): string =
+  ## Explicit REJECT text for a sub/ws_raw record that failed its schema:
+  ## names the record, its seq and the boundary, like restRejection.
+  kindNameText & " at seq " & $seqNo & " is rejected: " & detail &
+  " (acceptance needs exactly the declared schema fields for the " &
+  "record's (action, phase) combination; the live subscription wire " &
+  "format is unverified by a measured producer (G2/G4), so any schema " &
+  "doubt is a failure)"
+
 proc runCore*(recs: seq[Record]): CoreResult =
   validateRecords(recs)
   let cal = recs[0].raw
@@ -163,6 +195,26 @@ proc runCore*(recs: seq[Record]): CoreResult =
         raise newException(RecordError, restRejection(recs[i].seq, e.msg))
     of kCalendar, kConfig:
       discard
+    of kSub, kWsRaw:
+      # VS-2 §12.5 subscription evidence, validated acceptance path like
+      # rest_resp: each record must parse against its declared schema
+      # (sub: gen/action/phase/t plus exactly its combination's fields;
+      # ws_raw: channel/conn/t/payload_hex) or the run is rejected at the
+      # record's own seq. Consumption is the count alone: no live
+      # collector exists, so a valid sub/ws_raw record never moves the
+      # verdict and changes no output byte.
+      try:
+        case recs[i].kind
+        of kSub:
+          discard parseSub(recs[i].seq, recs[i].raw)
+          inc result.subCount
+        of kWsRaw:
+          discard parseWsRaw(recs[i].seq, recs[i].raw)
+          inc result.wsRawCount
+        else: discard
+      except SubInputError as e:
+        raise newException(RecordError,
+          schemaRejection(kindName(recs[i].kind), recs[i].seq, e.msg))
     else:
       inc result.ignoredKinds
   # The declared page chains are audited once the record set is complete: a
