@@ -2,7 +2,8 @@
 ## No wall clock, no filesystem, no arguments: every input that changes a
 ## verdict is inside input.hcj.jsonl (plan §3.0/§3.1).
 import std/[strutils, algorithm]
-import hcj, records, calendars, bars, engine, rest_resp, sub_input
+import hcj, records, calendars, bars, engine, rest_resp, sub_input, vendor_input,
+       tickwire, subcheck
 
 type
   Config* = object
@@ -12,6 +13,13 @@ type
     ## stream declares none). The marker-aware verify rules key on this
     ## field; a present-but-invalid value is a parse failure (fail-closed).
     environment*: string
+    ## The declared re-poll cadence in seconds (config.repoll_seconds;
+    ## 0 = undeclared). Declared, it opens rest_resp's approved multi-round
+    ## page-chain audit (rest_resp.verifyAttempts); undeclared, the
+    ## chain-restart REJECT stays in force.
+    repollSeconds*: int
+    ## The declared page cap (config.page_cap; defaultPageCap when absent).
+    pageCap*: int
 
   RunStatus* = enum
     rsOk, rsIncomplete, rsUnreliableFlag
@@ -35,6 +43,18 @@ type
     ## output byte.
     subCount*: int
     wsRawCount*: int
+    ## §12.5/§10 consumption checks (subcheck), recomputed deterministically
+    ## over the stream-order sub/ws_raw evidence. Quarantined 0B ticks never
+    ## fed bars or signals; the count and the first reasons are reported.
+    ## Quarantine is NOT a REJECT and never moves a verdict.
+    quarantined*: int
+    quarantineNotes*: seq[string]
+    regAcks0B*: int
+    removeAcks0B*: int
+    ## The distinct observed FID 215 values, in first-observation order,
+    ## re-derived from the 0s ws_raw payloads (the close-evidence subset is
+    ## tickwire.closeEvidence215).
+    closeValues*: seq[string]
 
 proc intOr(raw: HcjValue; key: string; dflt: int): int =
   if raw.kind == hkObj and raw.has(key) and raw.get(key).kind == hkInt:
@@ -68,6 +88,25 @@ proc parseConfig*(raw: HcjValue): Config =
       raise newException(RecordError,
         "config.environment is not demo|prod: " & e.strVal)
     result.environment = e.strVal
+  # The declared re-poll cadence and page cap (tools/collector/README.md
+  # §6.1): both optional, both fail-closed on a wrong type or a
+  # non-positive value. repoll_seconds 0 means undeclared — the page-chain
+  # audit stays single-round; page_cap defaults to the approved PH-1 value.
+  result.repollSeconds = intOr(raw, "repoll_seconds", 0)
+  if result.repollSeconds < 0:
+    raise newException(RecordError,
+      "config.repoll_seconds must be >= 0: " & $result.repollSeconds)
+  if raw.has("page_cap"):
+    let pc = raw.get("page_cap")
+    if pc.kind != hkInt:
+      raise newException(RecordError,
+        "config.page_cap is not an integer: " & kindName(pc))
+    if int(pc.ival) < 1:
+      raise newException(RecordError,
+        "config.page_cap must be >= 1: " & $pc.ival)
+    result.pageCap = int(pc.ival)
+  else:
+    result.pageCap = defaultPageCap
   let p = if raw.has("params"): raw.get("params") else: hNull()
   result.params = Params(
     lookback: intOr(p, "lookback", 3),
@@ -149,6 +188,7 @@ proc runCore*(recs: seq[Record]): CoreResult =
   var b = initBars(result.spec)
   var sawEnd = false
   var restAttempts: seq[RestRespAttempt] = @[]
+  var guard = initSubGuard()
   for i in 2 ..< recs.len:
     case recs[i].kind
     of kWsFrame:
@@ -200,30 +240,97 @@ proc runCore*(recs: seq[Record]): CoreResult =
       # rest_resp: each record must parse against its declared schema
       # (sub: gen/action/phase/t plus exactly its combination's fields;
       # ws_raw: channel/conn/t/payload_hex) or the run is rejected at the
-      # record's own seq. Consumption is the count alone: no live
-      # collector exists, so a valid sub/ws_raw record never moves the
-      # verdict and changes no output byte.
+      # record's own seq. Beyond the schema, every record feeds the subcheck
+      # guard in stream order (README §10): a ws_raw's channel label must
+      # match the class its bytes re-derive to, its 0B payload must parse by
+      # the single tickwire parser (any deviation REJECTs at this seq), and
+      # each parsed tick is either inside the confirmed active set (fed to
+      # the bars, byte-identical to the live collector's consumption) or
+      # quarantined — counted with its reason, never fed anywhere. The 0s
+      # payloads contribute the FID 215 observations. REG/REMOVE/LOGIN/
+      # PING/unknown payloads stay preserved bytes only.
       try:
         case recs[i].kind
         of kSub:
-          discard parseSub(recs[i].seq, recs[i].raw)
+          let sub = parseSub(recs[i].seq, recs[i].raw)
+          guard.observeSub(sub)
           inc result.subCount
         of kWsRaw:
-          discard parseWsRaw(recs[i].seq, recs[i].raw)
+          let w = parseWsRaw(recs[i].seq, recs[i].raw)
+          guard.observeWsRaw(w.conn)
+          let cls = classify(w.payload)
+          if channelOfClass(cls) != w.channel:
+            raise newException(SubInputError,
+              "recorded channel \"" & w.channel & "\" does not match the " &
+              "class the payload re-derives to (\"" &
+              channelOfClass(cls) & "\"); a mislabeled payload is a " &
+              "record-consistency failure")
+          case cls
+          of wcReal0B:
+            for tick in ticksOf0B(recs[i].seq, w.payload):
+              let q = guard.checkTick(tick.item)
+              if q.kind == qkNone:
+                feedTick(b, tick.item, hmsToSec(tick.t) - result.spec.openSec,
+                         tick.price, tick.cumVol, tick.flag)
+              else:
+                inc result.quarantined
+                if result.quarantineNotes.len < 64:
+                  result.quarantineNotes.add(
+                    (case q.kind
+                     of qkUnsubscribed: "unsubscribed"
+                     of qkPostRemove: "post_remove"
+                     of qkStaleConn: "stale_conn"
+                     of qkNone: "none") & " seq=" & $recs[i].seq &
+                    " item=" & tick.item)
+          of wcReal0S:
+            for st in statesOf0S(recs[i].seq, w.payload):
+              if st.value215.len > 0 and st.value215 notin result.closeValues:
+                result.closeValues.add(st.value215)
+          else:
+            discard
           inc result.wsRawCount
         else: discard
       except SubInputError as e:
+        raise newException(RecordError,
+          schemaRejection(kindName(recs[i].kind), recs[i].seq, e.msg))
+      except TickwireError as e:
+        raise newException(RecordError,
+          schemaRejection(kindName(recs[i].kind), recs[i].seq, e.msg))
+      except SubGuardError as e:
         raise newException(RecordError,
           schemaRejection(kindName(recs[i].kind), recs[i].seq, e.msg))
     else:
       inc result.ignoredKinds
   # The declared page chains are audited once the record set is complete: a
   # body or chain failure is a contract violation (REJECT, exit 2) and takes
-  # precedence over INCOMPLETE, never a silent pass.
+  # precedence over INCOMPLETE, never a silent pass. The declared re-poll
+  # cadence and page cap come from the config record (README §6.1); with no
+  # declared cadence the audit stays single-round.
   try:
-    result.restVerified = verifyAttempts(restAttempts).len
+    result.restVerified = verifyAttempts(restAttempts, result.config.pageCap,
+                                         result.config.repollSeconds).len
   except RestRespError as e:
     raise newException(RecordError, restRejection(e.seqNo, e.msg))
+  result.regAcks0B = guard.regAckCount0B()
+  result.removeAcks0B = guard.removeAckCount0B()
+  # The minimum close evidence of a sealed live stream (README §10): a
+  # stream that declares an environment and carries the session_end seal
+  # must re-derive, from its own preserved bytes, the documented
+  # termination evidence — a FID 215 close value in {4,8} observed and a
+  # confirmed (remove, ack 0) 0B teardown. A seal without that evidence is
+  # a collector contract violation: REJECT, fail-closed, never approval.
+  if result.config.environment.len > 0 and sawEnd:
+    var closeSeen = false
+    for v in result.closeValues:
+      if isCloseEvidence(v): closeSeen = true
+    if not closeSeen or result.removeAcks0B < 1:
+      raise newException(RecordError,
+        "the stream declares environment " & result.config.environment &
+        " and is sealed, but the minimum close evidence was not re-detected " &
+        "at replay (FID 215 in {4,8} observed: " & $closeSeen &
+        "; confirmed 0B REMOVE acks: " & $result.removeAcks0B &
+        ") — a sealed live session must carry its termination evidence " &
+        "(tools/collector/README.md §10); rejected fail-closed")
   result.frames = b.frames
   result.conflicts = b.conflicts
   if not sawEnd:
