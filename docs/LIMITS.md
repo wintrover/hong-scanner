@@ -20,7 +20,10 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | thresholds come from a synthetic fixture | PH-1 calibrates them on a real capture; that same session cannot also prove detection | PH-1/PH-2 |
 | signals == 0 on a real day is not a bug | `NO_TRIGGER_OBSERVED` is a valid outcome | PH-2 |
 | one market (KRX) only | the global goal needs a second adapter and the same acceptance evidence | V2 |
-| `rest_resp` is rejected in VS-1 | a real attempt cannot be replayed until VS-2 defines and validates its result format | VS-2 |
+| `rest_resp` is schema-audited, not live-verified | a record that fails the declared §12.1 schema still rejects the run (exit 2); a verified page changes no output byte, and whether production responses match this shape is unmeasured | G2/G4 |
+| the vendor provides no message-sequence or completeness contract | verified by full-text search of all 337 API specs (zero hits); a silent drop and a quiet market are indistinguishable from the client stream | G2 spot-check |
+| the Kiwoom SDK is license-restricted | local install and use for the service are permitted; copying, modifying or bundling it in this repo is not — the adapter boundary must keep vendor code external | VS-2 adapter |
+| the credential runtime has hard requirements | kwcli needs Python >= 3.13 (system has 3.12) and a D-Bus session bus for the Secret Service; a systemd `--user` unit must set `DBUS_SESSION_BUS_ADDRESS` explicitly | VS-2 runtime |
 | `run.json` is excluded from checksums | determinism covers the three data artifacts only | inherent |
 | `provenance=OK` is self-declared consistency, not independent authenticity | compiler `-d` values and run metadata can be forged together; a match cannot prove the source tree was clean | trusted build and independent attestation design |
 | previous runs require their original executable and calendar | the build gate builds the current main, while the run directory does not preserve the executable | run archive and retention design |
@@ -29,7 +32,7 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | Northflank fixed egress IP is unverified | no account in scope; U5 stays open | deployment |
 | provider tick completeness is unverified | a silent feed drop and a quiet market can produce the same stream; `NO_TRIGGER_OBSERVED` speaks only about the observed stream | G2 spot-check (WS bars vs REST `acc_trde_qty`) |
 | the ka10027 page cap is scanner-side | if more pages remain when the cap is reached, they are "not fetched", not "no more candidates" | VS-2 recorder contract |
-| byte evidence excludes TLS, TCP framing and WS control frames | application payloads and non-secret pagination metadata do not expose every transport-level anomaly | VS-2 recorder contract |
+| byte evidence excludes TLS, TCP framing and WS control frames | application payloads and non-secret pagination metadata do not expose every transport-level anomaly; the payload boundary is implementable as `websockets` `recv(decode=False)` (official docs, returns payload bytes after fragment reassembly) | VS-2 recorder contract |
 | attestation is not implemented | `provenance=OK` stays self-declared; no installed-file digest is recorded, so the deployed binary cannot be tied to the exact main sha | attestation design |
 | CI green is bounded trust | the workflow file and repo-admin actions sit inside the trust boundary; GitHub Actions cannot attest what is installed on the host | attestation design |
 | strategy intervals and thresholds are held before approval | `warmup`/`lookback` windows and bp thresholds come from a synthetic fixture; signals before the PH-1 freeze are not acceptance evidence | PH-1 |

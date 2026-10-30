@@ -33,7 +33,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P0 | 계획 동결(v6.1) | — | 4건 반영 | DONE |
 | P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | DONE |
 | P2 | 툴체인 핀 | `nim --version` | 2.2.10 | DONE |
-| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 이번 변경의 로컬 결과를 별도 확인 |
+| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 2026-10-30 로컬 실측 13 스위트 통과(증거 로그); PR #6에서 CI 재확인 |
 | P4 | 브랜치/PR | `gh pr view` | PR #1 merged (`cf5a5f6`) | DONE |
 | P5 | CI green | `gh pr checks` | `ci` pass on PR #1 and on main push | DONE |
 | P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
@@ -43,7 +43,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(VS-2 live recorder) |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 미구현(목표 계약) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 1회 실측 완료(2026-10-30, main `1908427`; 이후 main 변경 시 재실시) |
 
 ### Evidence log (2026-10-29)
 
@@ -53,6 +53,16 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P6 | 6a: `enforce_admins=true`, `strict=true`, `checks=[ci]`, `approvals=0`, `force_push=false`, `deletions=false`; ruleset `26109780` `enforcement=active`, `bypass_actors=[]`. 6b: probe `eb7ac5b` (tree `e404ea3` == `origin/main`) with `ci success` → `git push origin HEAD:main` exit 1, `remote: error: GH013 ... Changes must be made through a pull request`, `refs/heads/main` unchanged at `cf5a5f6` |
 | P7 | `BUILD OK commit=0e8fa88f12e3f2efc250fee043c69dc4867f171c source_ref=main origin_main=0e8fa88... nim=2.2.10`; `GIT clean=true`; `CALENDAR_INDEX=OK files=2`; `DOCTOR RESULT=OK` exit 0 |
 | P8 | `REPLAY OK bars=22 signals=8 frames=24`; `VERDICT MATCH provenance=OK` exit 0; `run.json` `code_commit=0e8fa88`, `source_ref=main`, `dirty=false`, `nim=2.2.10` |
+
+### Evidence log (2026-10-30) — CI gate integrity fix + first attested install
+
+| gate | observed |
+|---|---|
+| P3(정정) | 2026-10-29 main run `40883550758`: `nimble test`의 nimscript exec 실패가 exit 0으로 보고되어 빌드 계약 3건 실패에도 `ci` green — 거짓 green. 수정: `tools/run_tests.sh`(PR #5, merge `1908427`). PR #5 `ci` 로그에 `ALL CONTRACT SUITES PASSED` 실측 확인(12 스위트: 55/23/82/107/57/23/130/72/46/18/161/45) |
+| P13 | main `1908427` push에서 `attest` 워크플로 16단계 전부 성공(run `40976811441`); 아티팩트 sha256 `59b7c18f85acd1a64d7a03a0eff3afa99a84f3218a3187221f2884f561870874` == build-report == `hongscanner.sha256`; `gh attestation verify ... --signer-workflow wintrover/hong-scanner/.github/workflows/attest.yml --source-ref refs/heads/main --source-digest 1908427... --deny-self-hosted-runners` exit 0; `tools/install-attested.sh` → `~/.local/share/hongscanner/versions/0.1.0-main-1908427`(current symlink 원자 전환, `sha256sum -c` OK); 설치 바이너리로 `replay`/`verify` → `REPLAY OK bars=22 signals=8` / `VERDICT MATCH provenance=OK` exit 0. 증명의 신뢰 경계는 LIMITS.md "bounded trust" 그대로 |
+| P3(rest_resp) | 2026-10-30 rest_resp 수용 경로(§12.1 스키마·페이지 체인 검증) 반영 후 로컬 실측: `bash tools/run_tests.sh` exit 0, `ALL CONTRACT SUITES PASSED` — 13 스위트, 897 단언(55/23/82/107/57/23/**78**/130/72/46/18/161/45, 신규 `test_rest_resp_contract` 굵게). 기존 거부 스위트(`test_rest_failure_contract` 23)는 무수정 통과 — 레거시 페이로드는 여전히 REJECT |
+
+한계: P13의 이 증거는 "이 바이너리가 그 main 빌드에서 나왔다"는 독립 근거일 뿐, 전원 차단 내구성이나 실거래 운영 승인(P12)이 아니다. 설치 후 `versions` 비쓰기는 운영 요건이다.
 
 ## Completion Evidence
 

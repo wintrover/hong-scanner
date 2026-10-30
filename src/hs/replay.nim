@@ -2,7 +2,7 @@
 ## No wall clock, no filesystem, no arguments: every input that changes a
 ## verdict is inside input.hcj.jsonl (plan §3.0/§3.1).
 import std/[strutils, algorithm]
-import hcj, records, calendars, bars, engine
+import hcj, records, calendars, bars, engine, rest_resp
 
 type
   Config* = object
@@ -21,6 +21,11 @@ type
     frames*: int
     conflicts*: int
     ignoredKinds*: int
+    ## rest_resp pages whose declared page chain verified as confirmed
+    ## success (REPLAY_CONTRACT §12.1). Minimal consumption record: there is
+    ## no live collector yet, so a verified page never moves the verdict --
+    ## bars and signals stay exactly the stream's tick-derived output.
+    restVerified*: int
 
 proc intOr(raw: HcjValue; key: string; dflt: int): int =
   if raw.kind == hkObj and raw.has(key) and raw.get(key).kind == hkInt:
@@ -94,6 +99,16 @@ proc signalLine*(s: Signal): string =
     ("signal", hStr(s.signal)),
     ("symbol", hStr(s.symbol))))
 
+proc restRejection(seqNo: int; detail: string): string =
+  ## Explicit REJECT text for a rest_resp that failed the validated
+  ## acceptance path: always names the record, its seq and the verification
+  ## boundary, so a rejection is self-explaining on the CLI.
+  "rest_resp at seq " & $seqNo & " is rejected: " & detail &
+  " (acceptance needs a declared request scope, a preserved response and " &
+  "a page chain that affirms success; the live REST wire format is " &
+  "unverified by a measured producer (G2/G4), so no unconfirmed state can " &
+  "mean success)"
+
 proc runCore*(recs: seq[Record]): CoreResult =
   validateRecords(recs)
   let cal = recs[0].raw
@@ -101,6 +116,7 @@ proc runCore*(recs: seq[Record]): CoreResult =
   result.spec = sessionFor(cal, result.config.sessionDate)
   var b = initBars(result.spec)
   var sawEnd = false
+  var restAttempts: seq[RestRespAttempt] = @[]
   for i in 2 ..< recs.len:
     case recs[i].kind
     of kWsFrame:
@@ -127,20 +143,35 @@ proc runCore*(recs: seq[Record]): CoreResult =
       sawEnd = true
       closeAtSessionEnd(b)
     of kRestResp:
-      # Fail-closed placeholder contract. VS-1 has no REST producer and the
-      # live rest_resp wire format is unmeasured (G4: U1/U3), so no payload --
-      # not even a success-shaped one -- can be proven to mean success.
-      # Reject the record instead of discarding it: a discarded failed
-      # attempt would otherwise leave the verdict OK once session_end
-      # arrives. This is not VS-2 candidate selection; the accepted shape is
-      # defined only when a real producer is measured.
-      raise newException(RecordError, "rest_resp at seq " & $recs[i].seq &
-        " is rejected: the REST wire format is unverified (G4), so no " &
-        "rest_resp can be treated as success in VS-1")
+      # VS-2 §12.1 validated acceptance path, replacing the VS-1 fail-closed
+      # placeholder. A record is accepted only when its raw payload parses
+      # against the rest_resp schema: a declared request scope (ka10027,
+      # KRX-only, one query per direction), a 1-based page index, and the
+      # preserved original HTTP response (status, cont-yn/next-key, body
+      # bytes byte-exact via body_hex). Schema failures reject here, at the
+      # record's own seq. Success is affirmed by the vendor_input rules
+      # only -- HTTP 200, return_code present + integer + 0, list key
+      # present -- and body-level or chain-level failures (cont-yn repeat,
+      # page cap, missing page, page order) still reject the whole run once
+      # the stream is complete (see verifyAttempts after the loop).
+      # Verified pages are counted in the result but do not move the
+      # verdict: no live collector exists, so candidate-scope consumption
+      # stays future work (G2/G4: no measured producer capture).
+      try:
+        restAttempts.add(parseAttempt(recs[i].seq, recs[i].raw))
+      except RestRespError as e:
+        raise newException(RecordError, restRejection(recs[i].seq, e.msg))
     of kCalendar, kConfig:
       discard
     else:
       inc result.ignoredKinds
+  # The declared page chains are audited once the record set is complete: a
+  # body or chain failure is a contract violation (REJECT, exit 2) and takes
+  # precedence over INCOMPLETE, never a silent pass.
+  try:
+    result.restVerified = verifyAttempts(restAttempts).len
+  except RestRespError as e:
+    raise newException(RecordError, restRejection(e.seqNo, e.msg))
   result.frames = b.frames
   result.conflicts = b.conflicts
   if not sawEnd:
