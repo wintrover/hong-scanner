@@ -1,0 +1,6 @@
+# The sidecar's only third-party dependency. The Kiwoom SDK is NOT a
+# dependency (license forbids copying/bundling; the sidecar speaks the
+# documented wire protocol directly). Pinned to the version whose behavior
+# contract is measured (agent-dws3l01r: websockets 17.3 official docs —
+# recv(decode=False), ping_interval, ConnectionClosed code/reason).
+websockets==17.3
