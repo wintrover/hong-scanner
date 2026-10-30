@@ -166,8 +166,18 @@ jobs:
           nim-version: '2.2.10'
           parent-nim-install-directory: ${{ runner.temp }}
 
+      # The gate now includes the sidecar contract suite: it needs the same
+      # documented interpreter line (tools/collector/README.md 11) as ci.yml.
+      # The suite itself stays fail-closed: no interpreter is a failure.
+      - name: Install Python 3.13 for the sidecar contract suite
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+
       - name: Test gate - full contract suite on the exact bits to be attested
         run: bash tools/run_tests.sh
+        env:
+          HSCOLLECTOR_PYTHON: python3
 
       - name: Create the isolated build output dir under RUNNER_TEMP (never in the repo)
         id: builddir
