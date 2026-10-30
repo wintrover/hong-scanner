@@ -33,7 +33,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P0 | 계획 동결(v6.1) | — | 4건 반영 | DONE |
 | P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | DONE |
 | P2 | 툴체인 핀 | `nim --version` | 2.2.10 | DONE |
-| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 2026-10-30 로컬·CI 실측 13 스위트 통과(증거 로그; PR #6 push·pull_request 양 실행 로그에서 `ALL CONTRACT SUITES PASSED` 확인) |
+| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 2026-10-30 로컬·CI 실측 14 스위트 통과(증거 로그; PR #6·PR #9 push·pull_request 실행 로그에서 `ALL CONTRACT SUITES PASSED` 확인) |
 | P4 | 브랜치/PR | `gh pr view` | PR #1 merged (`cf5a5f6`) | DONE |
 | P5 | CI green | `gh pr checks` | `ci` pass on PR #1 and on main push | DONE |
 | P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
@@ -43,7 +43,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(VS-2 live recorder) |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 2회 실측 완료(2026-10-30, main `1908427`·`edc1b4a`; 배포 동작을 바꾸는 main 변경마다 재실시) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 3회 실측 완료(2026-10-30, main `1908427`·`edc1b4a`·`342557d`; 배포 동작을 바꾸는 main 변경마다 재실시) |
 
 ### Evidence log (2026-10-29)
 
@@ -62,6 +62,13 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P13 | main `1908427` push에서 `attest` 워크플로 16단계 전부 성공(run `40976811441`); 아티팩트 sha256 `59b7c18f85acd1a64d7a03a0eff3afa99a84f3218a3187221f2884f561870874` == build-report == `hongscanner.sha256`; `gh attestation verify ... --signer-workflow wintrover/hong-scanner/.github/workflows/attest.yml --source-ref refs/heads/main --source-digest 1908427... --deny-self-hosted-runners` exit 0; `tools/install-attested.sh` → `~/.local/share/hongscanner/versions/0.1.0-main-1908427`(current symlink 원자 전환, `sha256sum -c` OK); 설치 바이너리로 `replay`/`verify` → `REPLAY OK bars=22 signals=8` / `VERDICT MATCH provenance=OK` exit 0. 증명의 신뢰 경계는 LIMITS.md "bounded trust" 그대로 |
 | P3(rest_resp) | 2026-10-30 rest_resp 수용 경로(§12.1 스키마·페이지 체인 검증) 반영 후 로컬 실측: `bash tools/run_tests.sh` exit 0, `ALL CONTRACT SUITES PASSED` — 13 스위트, 897 단언(55/23/82/107/57/23/**78**/130/72/46/18/161/45, 신규 `test_rest_resp_contract` 굵게). 기존 거부 스위트(`test_rest_failure_contract` 23)는 무수정 통과 — 레거시 페이로드는 여전히 REJECT |
 | P13(edc1b4a) | main `edc1b4a`(PR #6 merge) push: ci `40979766637` 성공(로그 `ALL CONTRACT SUITES PASSED` 실측), attest `40979766630` 성공(1m57s). 아티팩트 sha256 `a31559ec3aae21c2a5bf27c0764b3d393c66cdf8e53205d8bf9e16bddd97df1a` == `hongscanner.sha256`; `gh attestation verify ... --source-digest edc1b4a...` exit 0, 반증: `--source-digest 1908427...` → exit 1 `expected ... got edc1b4a`(판별력 확인); `tools/install-attested.sh` → `versions/0.1.0-main-edc1b4a`, current 원자 전환(이전 `1908427` 버전 보존), `sha256sum -c` OK; 설치 바이너리로 smoke `replay`/`verify` → `VERDICT MATCH provenance=OK` exit 0, 그리고 **유효 rest_resp 포함 스트림**도 `REPLAY OK bars=4 signals=2` / `VERDICT MATCH provenance=OK` exit 0 — 신규 수용 경로의 배포 바이너리 종단 확인 |
+
+### Evidence log (2026-10-30) — VS-2 PR-1 계약 기반 merge (main `342557d`)
+
+| gate | observed |
+|---|---|
+| P3(sub,ws_raw) | PR #9(vs2-contracts, merge `342557d`) 반영 후 main push `ci` 런 `41047341624` 로그에서 `ALL CONTRACT SUITES PASSED` 실측 — 14 스위트 1127 단언(55/23/82/107/57/23/78/**175**/130/109/64/18/161/45, 신규 `test_sub_input_contract` 굵게; 마지막 45는 calendar 파이썬 스위트 `Ran 45 tests ... OK`). `test_recorder_contract` 72→109(8단계 finish·COMMITTED 마커), `test_cli_contract` 46→64(verify `COMMIT=` 출력·environment 게이트). merge 전 동일 트리 로컬 게이트도 exit 0·마커 실측 |
+| P13(342557d) | main `342557d`(PR #9 merge) push: ci `41047341624` 성공(로그 마커 실측), attest `41047341861` 성공. `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `342557d…`, github-hosted-only) → `versions/0.1.0-main-342557d`, sha256 `30201116b59be24a054543c3776ea77b57a314a503882326c03b2e177254881f`, current 원자 전환(이전 버전들 보존); 설치 바이너리로 신규 디렉터리 `runs/smoke-2026-10-30-342557d` smoke: `replay` → `REPLAY OK bars=22 signals=8 frames=24` exit 0, `verify` → `VERDICT MATCH provenance=OK` + `COMMIT=ABSENT` exit 0 — 신규 COMMIT 라인이 environment 없는 VS-1 스트림에서 ABSENT로 정상 출력. `run.json` `code_commit=342557d…` == `build.origin_main_sha=342557d…`, `source_ref=main`, `nim=2.2.10`, `dirty=false` |
 
 한계: P13의 이 증거는 "이 바이너리가 그 main 빌드에서 나왔다"는 독립 근거일 뿐, 전원 차단 내구성이나 실거래 운영 승인(P12)이 아니다. 설치 후 `versions` 비쓰기는 운영 요건이다.
 
@@ -108,8 +115,9 @@ error text, P7/P8 need the printed lines above.
 
 ## Candidate scope (VS-2 목표 계약 — 미구현)
 
-"후보"의 정의를 이 계약이 선언한다. 지금은 선언일 뿐, 이를 조회하는 코드는
-없다. VS-1 Core는 검증되지 않은 `rest_resp`를 거부한다.
+"후보"의 정의를 이 계약이 선언한다. 이를 조회하는 코드는 아직 없다.
+Core는 계약 검증을 통과한 `rest_resp`·`sub`·`ws_raw`만 수용하고, 검증되지
+않은 페이로드는 거부한다.
 
 - 조회: 키움 REST `ka10027` 전일대비등락률상위요청 — `POST /api/dostk/rkinfo`.
 - 거래소: `stex_tp="1"`(KRX). `2`(NXT)와 `3`(통합)은 이 계약의 후보
