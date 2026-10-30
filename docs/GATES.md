@@ -33,17 +33,17 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P0 | 계획 동결(v6.1) | — | 4건 반영 | DONE |
 | P1 | public repo, 합성 전용 CI | `gh repo view` | public, workflow `ci` | DONE |
 | P2 | 툴체인 핀 | `nim --version` | 2.2.10 | DONE |
-| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 2026-10-30 로컬·CI 실측 14 스위트 통과(증거 로그; PR #6·PR #9 push·pull_request 실행 로그에서 `ALL CONTRACT SUITES PASSED` 확인) |
+| P3 | VS-1 계약 | `bash tools/run_tests.sh` | 모든 합성 테스트 통과, exit 0 | 2026-10-30 로컬·CI 실측 19 스위트 통과(증거 로그; PR #6·#9·#11 push·pull_request 실행 로그에서 `ALL CONTRACT SUITES PASSED` 확인) |
 | P4 | 브랜치/PR | `gh pr view` | PR #1 merged (`cf5a5f6`) | DONE |
 | P5 | CI green | `gh pr checks` | `ci` pass on PR #1 and on main push | DONE |
 | P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
 | P7 | canonical main | `tools/build.sh` → 출력 경로의 `hongscanner doctor` | build commit equals current main, `DOCTOR RESULT=OK` | 역사적 증거만 있음; 현재 변경분 미검증 |
 | P8 | 합성 replay | 빌드 출력의 `hongscanner replay` + `verify` | `VERDICT MATCH provenance=OK`, exit 0 | 역사적 합성 증거만 있음; 현재 변경분 미검증 |
 | P9 | 실측 데이터 경로 | real session | `VERDICT MATCH provenance=OK` | BLOCKED(G2) |
-| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(VS-2 live recorder) |
+| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(수집기는 PR #11 구현, 타이머·운영 전환 미구축) |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 3회 실측 완료(2026-10-30, main `1908427`·`edc1b4a`·`342557d`; 배포 동작을 바꾸는 main 변경마다 재실시) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 4회 실측 완료(2026-10-30, main `1908427`·`edc1b4a`·`342557d`·`4f732da`; `f4ad05c`는 attest 게이트 실패로 미설치 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
 
 ### Evidence log (2026-10-29)
 
@@ -69,6 +69,13 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 |---|---|
 | P3(sub,ws_raw) | PR #9(vs2-contracts, merge `342557d`) 반영 후 main push `ci` 런 `41047341624` 로그에서 `ALL CONTRACT SUITES PASSED` 실측 — 14 스위트 1127 단언(55/23/82/107/57/23/78/**175**/130/109/64/18/161/45, 신규 `test_sub_input_contract` 굵게; 마지막 45는 calendar 파이썬 스위트 `Ran 45 tests ... OK`). `test_recorder_contract` 72→109(8단계 finish·COMMITTED 마커), `test_cli_contract` 46→64(verify `COMMIT=` 출력·environment 게이트). merge 전 동일 트리 로컬 게이트도 exit 0·마커 실측 |
 | P13(342557d) | main `342557d`(PR #9 merge) push: ci `41047341624` 성공(로그 마커 실측), attest `41047341861` 성공. `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `342557d…`, github-hosted-only) → `versions/0.1.0-main-342557d`, sha256 `30201116b59be24a054543c3776ea77b57a314a503882326c03b2e177254881f`, current 원자 전환(이전 버전들 보존); 설치 바이너리로 신규 디렉터리 `runs/smoke-2026-10-30-342557d` smoke: `replay` → `REPLAY OK bars=22 signals=8 frames=24` exit 0, `verify` → `VERDICT MATCH provenance=OK` + `COMMIT=ABSENT` exit 0 — 신규 COMMIT 라인이 environment 없는 VS-1 스트림에서 ABSENT로 정상 출력. `run.json` `code_commit=342557d…` == `build.origin_main_sha=342557d…`, `source_ref=main`, `nim=2.2.10`, `dirty=false` |
+
+### Evidence log (2026-10-30) — VS-2 PR-2 라이브 수집기 merge + attest 게이트 Python 수정
+
+| gate | observed |
+|---|---|
+| P3(collector) | PR #11(vs2-collector, 4커밋 `87ec1a9` 계약 → `24e5fb7` 구현 → `6359dfc` 테스트 → `fd9ea2c` 검토 수정: `recv(decode=False)` 계약 교정) merge. CI 3런: pull_request `41066643516`·push `41066634583`·synchronize `41067531981` — 첫 merge 시도는 ruleset strict(up-to-date) 요건으로 정당 차단, merge 커밋 `2cb9cd0`로 main 반영 후 재측정. 전 런 로그에서 `ALL CONTRACT SUITES PASSED` 실측. main `4f732da` push ci 런 `41069541804` 로그: **19 스위트 1337 단언**(55/23/82/107/57/23/78/**178**/130/109/**65**/**27**/**68**/**23**/**24**/64/18/161/45 — sub_input 175→178, 신규 `tickwire`·`subcheck`·`collector`·`collector_stream`·`sidecar`(python) 굵게; 마지막 45는 calendar 스위트). 로컬 게이트도 3회(구현 후·decode=False 수정 후·merge 커밋 후) exit 0·마커 실측 |
+| P13(f4ad05c→4f732da) | main `f4ad05c`(PR #11 merge) push: ci `41067888845` 성공(마커 실측), attest `41067888986` **실패** — attest 워크플로 게이트에 Python 3.13 설치가 누락돼 sidecar 스위트가 fail-closed 탈락(`no Python 3.13 interpreter found`); `f4ad05c`는 설치하지 않음(실패 런 증거 보존). 수정 PR #12(`ae2ca94`: attest.yml에 SHA 고정 setup-python v5 + `HSCOLLECTOR_PYTHON=python3`) merge → main `4f732da` push: ci `41069541804`·attest `41069541491` 성공(각각 게이트 로그 마커 실측). `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `4f732da…`, github-hosted-only) → `versions/0.1.0-main-4f732da`, sha256 `ca72dd94a8e3b9376e918ea1ef350784a9a35c2d627d8201f7df9ed875043b32`, current 원자 전환(이전 버전 보존); 설치 바이너리로 신규 디렉터리 `runs/smoke-2026-10-30-4f732da` smoke: `replay` → `REPLAY OK bars=22 signals=8 frames=24` exit 0, `verify` → `VERDICT MATCH provenance=OK` + `COMMIT=ABSENT` exit 0. `run.json` `code_commit` == `build.origin_main_sha` == `4f732da…`, `source_ref=main`, `nim=2.2.10`, `dirty=false`. 라이브 관측(REST·WS 실측)은 포함되지 않음 — P9·P11·P12는 여전히 BLOCKED(G2) |
 
 한계: P13의 이 증거는 "이 바이너리가 그 main 빌드에서 나왔다"는 독립 근거일 뿐, 전원 차단 내구성이나 실거래 운영 승인(P12)이 아니다. 설치 후 `versions` 비쓰기는 운영 요건이다.
 
@@ -113,11 +120,12 @@ git push origin <ci-green-sha>:main
 `declare` is not evidence: P5 needs the run's conclusion, P6 needs the server
 error text, P7/P8 need the printed lines above.
 
-## Candidate scope (VS-2 목표 계약 — 미구현)
+## Candidate scope (VS-2 목표 계약 — 수집기 구현, 라이브 관측 전)
 
-"후보"의 정의를 이 계약이 선언한다. 이를 조회하는 코드는 아직 없다.
-Core는 계약 검증을 통과한 `rest_resp`·`sub`·`ws_raw`만 수용하고, 검증되지
-않은 페이로드는 거부한다.
+"후보"의 정의를 이 계약이 선언한다. 조회·구독을 수행하는 수집기(PR #11:
+sidecar + collector core)가 계약 스위트와 함께 구현·merge됐다. 단 실시장·
+모의 라이브 관측은 아직 없다(PH-1 대기). Core는 계약 검증을 통과한
+`rest_resp`·`sub`·`ws_raw`만 수용하고, 검증되지 않은 페이로드는 거부한다.
 
 - 조회: 키움 REST `ka10027` 전일대비등락률상위요청 — `POST /api/dostk/rkinfo`.
 - 거래소: `stex_tp="1"`(KRX). `2`(NXT)와 `3`(통합)은 이 계약의 후보
