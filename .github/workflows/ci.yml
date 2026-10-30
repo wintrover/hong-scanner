@@ -12,6 +12,15 @@ jobs:
       - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
         with:
           nim-version: '2.2.10'
+      # The sidecar contract suite runs on the documented interpreter line
+      # (tools/collector/README.md §11): HSCOLLECTOR_PYTHON pins the
+      # setup-python 3.13 as the resolved interpreter; the suite still
+      # refuses to report a pass without one.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
       # Never `nimble test` here: a failed exec in its nimscript task can
       # still exit 0, which once let a red suite pass as a green check.
       - run: bash tools/run_tests.sh
+        env:
+          HSCOLLECTOR_PYTHON: python3

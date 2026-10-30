@@ -154,6 +154,27 @@ proc wsRawRaw(channel = "0B"; conn = 1; t: string = ts;
   hObj(("channel", hStr(channel)), ("conn", hInt(conn)), ("payload_hex",
        hStr(payloadHex)), ("t", hStr(t)))
 
+proc hexOf(s: string): string =
+  const digits = "0123456789abcdef"
+  for c in s:
+    result.add(digits[int(ord(c)) shr 4])
+    result.add(digits[int(ord(c)) and 0x0f])
+
+proc tick0BPayload(item = "005930"): string =
+  ## One well-formed 0B REAL payload in the official example shape (README
+  ## §9): the FID set the single parser actually consumes.
+  "{\"trnm\":\"REAL\",\"data\":[{\"item\":\"" & item & "\",\"name\":\"" &
+    "주식체결\",\"type\":\"0B\",\"values\":{\"10\":\"10000\",\"13\":\"100\"," &
+    "\"15\":\"+1\",\"20\":\"090500\",\"25\":\"2\",\"290\":\"2\"}}]}"
+
+proc state0SPayload(value215 = "4"): string =
+  ## One well-formed 0s REAL payload (README §9 shape) carrying the market
+  ## state FID 215 — "4" is the close value the termination evidence
+  ## requires.
+  "{\"trnm\":\"REAL\",\"data\":[{\"item\":\"\",\"name\":\"장시작시간\"," &
+    "\"type\":\"0s\",\"values\":{\"20\":\"153000\",\"215\":\"" & value215 &
+    "\",\"214\":\"000000\"}}]}"
+
 # ------------------------------------------------------------- format rules
 
 block formatRules:
@@ -681,17 +702,25 @@ block configEnvironment:
 # ------------------------------------------------------------- stream level
 
 block streamLevel:
+  # The ws_raw payload is a well-formed 0B REAL tick in the official
+  # example shape; its REQ has no ack yet, so the consumption check
+  # quarantines the tick (stale connection generation) instead of
+  # consuming it into a bar.
   let subInserts: seq[(Kind, HcjValue)] = @[
     (kSub, regReq(gen = 1, types = @["0s"], codes = @[], refresh = "1")),
     (kSub, regReq(gen = 2, types = @["0B"], codes = @["005930", "000660"],
                   refresh = "1")),
-    (kWsRaw, wsRawRaw())]
+    (kWsRaw, wsRawRaw(payloadHex = hexOf(tick0BPayload())))]
   let lines = withInserts(baseLines(), 6, subInserts)
   let res = runOf("ok", lines)
   check("a stream with valid sub/ws_raw records replays OK",
         res.status == rsOk)
   check("the subscription records are counted on the result",
         res.subCount == 2 and res.wsRawCount == 1)
+  check("the unacked 0B tick is quarantined, not consumed",
+        res.quarantined == 1 and
+        res.quarantineNotes[0].startsWith("stale_conn") and
+        res.bars.len == 4)
   check("sub/ws_raw acceptance changes no output byte",
         coreBytes(lines) == coreBytes(baseLines()))
   check("an ack-only stream also replays OK",
@@ -712,6 +741,18 @@ block streamLevel:
                     bad.pairs.add(("frame", hStr("text")))
                     discard runOf("badws", withInserts(baseLines(), 6,
                       @[(kWsRaw, bad)])))
+  recordErrorUnit("stream: a garbage 0B ws_raw payload is REJECT at its " &
+                  "own seq", "is rejected",
+                  proc () =
+                    discard runOf("garbage", withInserts(baseLines(), 6,
+                      @[(kWsRaw, wsRawRaw(
+                          payloadHex = hexOf("totally not json")))])))
+  recordErrorUnit("stream: a mislabeled 0B channel is REJECT with the " &
+                  "record named", "does not match",
+                  proc () =
+                    discard runOf("mislabeled", withInserts(baseLines(), 6,
+                      @[(kWsRaw, wsRawRaw(channel = "0s",
+                          payloadHex = hexOf(tick0BPayload())))])))
   var msg = ""
   try:
     let bad = regReq()
@@ -759,7 +800,16 @@ proc writeMarker(runDir: string; shaOverride = ""; seqOverride = 0) =
   writeFile(input & ".committed", canonical(marker) & "\n")
 
 block commitGateRules:
-  let envLines = baseLines("demo")
+  # The fixtures below are honest sealed live streams: a stream that
+  # declares an environment must carry the minimum close evidence (README
+  # §10) — the 0s FID 215 close observation and the confirmed (remove,
+  # ack 0) 0B teardown — or replay rejects it before verify runs.
+  let envClose: seq[(Kind, HcjValue)] = @[
+    (kWsRaw, wsRawRaw(channel = "0s", payloadHex = hexOf(state0SPayload()))),
+    (kSub, removeReq(gen = 3, types = @["0B"],
+                     codes = @["005930", "000660"])),
+    (kSub, ackRaw(gen = 3, action = "remove", code = 0))]
+  let envLines = withInserts(baseLines("demo"), 6, envClose)
 
   let absent = verifyRun(runDirOf("absent", envLines))
   check("environment + marker ABSENT verifies INCOMPLETE exit 4",

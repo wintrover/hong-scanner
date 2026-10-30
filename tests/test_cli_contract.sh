@@ -254,6 +254,21 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     records = [json.loads(line) for line in f]
 records[1]["raw"]["environment"] = "demo"
+# A sealed live stream must carry the minimum close evidence
+# (tools/collector/README.md §10): the 0s FID 215 close observation and
+# the confirmed (remove, ack 0) 0B teardown, recorded before the seal.
+t = "2026-10-29T15:30:00+09:00"
+state = ('{"trnm":"REAL","data":[{"item":"","name":"장시작시간",'
+         '"type":"0s","values":{"20":"153000","215":"4","214":"000000"}}]}')
+close_evidence = [
+    {"kind": "ws_raw", "raw": {"channel": "0s", "conn": 1,
+     "payload_hex": state.encode("utf-8").hex(), "t": t}},
+    {"kind": "sub", "raw": {"action": "remove", "codes": ["005930"],
+     "gen": 1, "phase": "req", "t": t, "types": ["0B"]}},
+    {"kind": "sub", "raw": {"action": "remove", "gen": 1, "phase": "ack",
+     "return_code": 0, "t": t}},
+]
+records = records[:-1] + close_evidence + records[-1:]
 with open(sys.argv[2], "w", encoding="utf-8") as f:
     for seq, record in enumerate(records, 1):
         record["seq"] = seq
