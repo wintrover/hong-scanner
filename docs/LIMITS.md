@@ -9,9 +9,9 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | `13` (cumulative volume) semantics are unconfirmed | `bar_position` marks suspicion; it does not prove session-cumulative | G4 experiment (REST `acc_trde_qty` vs first `13`) |
 | REST bar timestamp interpretation needs source and live cross-check | the local official extract describes `cntr_tm` as the bar start; alignment with the WS feed is not yet measured | G4 |
 | `290` boundary behaviour at 15:30 is undocumented | conflicts are counted, not resolved | G4 |
-| SIGKILL drills do not prove power-loss durability | page cache survives process death | VS-2 recorder drill |
-| the standalone recorder is not a live collector | it is not wired to transport or the CLI and does not implement periodic fsync | VS-2 |
-| a recorded `session_end` is not proof of durable completion | fsync may fail after the marker is written; approval needs separate completion evidence | VS-2 approval |
+| SIGKILL drills do not prove power-loss durability | page cache survives process death; data written between the 60 s fsyncs can be lost and no absolute power-loss guarantee exists | VS-2 recorder drill |
+| the standalone recorder is not a live collector | it is not wired to transport or the CLI; it does implement seal + commit marker + periodic fsync, but a live producer is VS-2 work | VS-2 |
+| a recorded `session_end` is not proof of durable completion | verify requires a valid commit marker only for a declared `environment`; synthetic streams report the marker state without enforcing it | VS-2 approval |
 | no WebSocket client exists in VS-1 | handshake, framing, masking, close codes are VS-2 work | VS-2 |
 | strategy validity is not established | synthetic fixtures are not evidence of market behavior or profitability | PH-2 |
 | `breakdown_bp` is parsed but not applied | its reference and comparison are undefined, so bearish candidates are held instead of emitted | strategy contract |
@@ -32,6 +32,15 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | Northflank fixed egress IP is unverified | no account in scope; U5 stays open | deployment |
 | provider tick completeness is unverified | a silent feed drop and a quiet market can produce the same stream; `NO_TRIGGER_OBSERVED` speaks only about the observed stream | G2 spot-check (WS bars vs REST `acc_trde_qty`) |
 | the ka10027 page cap is scanner-side | if more pages remain when the cap is reached, they are "not fetched", not "no more candidates" | VS-2 recorder contract |
+| refresh=0's termination scope is undocumented | the official wording ("0일경우 기존등록한 item/type은 해지") does not say 전역/같은 grp_no/같은 type, so the scanner never sends refresh "0" | G2 mock subscription experiments |
+| grp_no has no documented semantics | its description is empty; all 46 official examples pin "1" | G2 |
+| REMOVE partial removal is undocumented | the scanner always REMOVEs a full generation, never a subset | G2 |
+| multi-type REG acceptance is undocumented | all official examples are single-type; the composition cannot produce a mixed REG | G2 |
+| the `0s` removal form is undocumented | the market-state channel ends with the connection; no REMOVE record exists for 0s | G2 |
+| the Kiwoom PING period and no-response policy are undocumented | received PINGs are recorded as ws_raw so the period becomes observable | G2 |
+| FID 215's full value table is unconfirmed | only the close subset {2, 4, 8, 9} is evidenced; 9 (전체장마감) occurs only after 18:00 | G2 observation |
+| the 200-code subscription total is unreachable through the composition | the direction caps (≤100) bind first — 100+100 is the reachable boundary; `composeRemoveData` has no direction split, so its total cap is independently enforced and tested | inherent |
+| demo observation success is not production evidence | Kiwoom documents the mock as a "가상 매매 시스템" test stage with "제공 기능 및 데이터에 일부 차이" possible, and claims no feed identity (UNVERIFIED) | PH-1 (separate production confirmation) |
 | byte evidence excludes TLS, TCP framing and WS control frames | application payloads and non-secret pagination metadata do not expose every transport-level anomaly; the payload boundary is implementable as `websockets` `recv(decode=False)` (official docs, returns payload bytes after fragment reassembly) | VS-2 recorder contract |
 | attestation is not implemented | `provenance=OK` stays self-declared; no installed-file digest is recorded, so the deployed binary cannot be tied to the exact main sha | attestation design |
 | CI green is bounded trust | the workflow file and repo-admin actions sit inside the trust boundary; GitHub Actions cannot attest what is installed on the host | attestation design |

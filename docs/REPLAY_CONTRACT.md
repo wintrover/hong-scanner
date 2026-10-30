@@ -1,4 +1,4 @@
-# Hong Scanner — Replay Contract (VS-1 baseline, v6.1)
+# Hong Scanner — Replay Contract (VS-1 baseline, VS-2 targets, v6.2)
 
 This document states the intended VS-1 contract. Tests cover selected cases;
 passing them does not prove every statement or replace review of the actual
@@ -29,9 +29,9 @@ One file, `input.hcj.jsonl`, one HCJ document per line.
 
 ## 3. Record kinds
 
-Exactly nine kinds exist. Unknown kinds are rejected (exit 2).
+Exactly eleven kinds exist. Unknown kinds are rejected (exit 2).
 
-Consumed by Core (six):
+Consumed by Core (eight):
 
 | kind | role |
 |---|---|
@@ -39,6 +39,8 @@ Consumed by Core (six):
 | `config` | `session_date` (required) + `params`; the only source of the run date |
 | `ws_frame` | one trade tick: `symbol`, `t` (`HH:MM:SS+09:00`), `price` (int), `vol` (cumulative int), `m` (field 290, optional) |
 | `rest_resp` | terminal record of one REST attempt (success, HTTP/vendor error, or transport failure) |
+| `sub` | one subscription request or acknowledgement (validated acceptance) |
+| `ws_raw` | one preserved WebSocket application payload, hex-encoded (validated acceptance) |
 | `gap` | `symbol` (string or null) — a period whose data cannot be trusted |
 | `session_end` | explicit normal close; `raw` is `null` |
 
@@ -49,13 +51,14 @@ Ignored by Core (three, diagnostic only):
 `ws_conn` describes how a connection changed; `gap` describes which data is
 untrustworthy. They are recorded separately and only `gap` has authority.
 
-Until a live producer is measured, `rest_resp` follows a **validated
-acceptance path**: each record parses against the declared §12.1 schema and
-the complete stream's declared page chains are audited (single source of
-truth: the vendor_input rules). A record that fails the schema rejects the
-run at its own seq (exit 2); a chain-level failure rejects the whole stream.
-Verified pages are counted (`restVerified`) and change no output byte. The
-live wire format itself is still unmeasured (G2/G4).
+Until a live producer is measured, `rest_resp`, `sub` and `ws_raw` follow a
+**validated acceptance path**: each record parses against its declared
+schema (§12.1 for `rest_resp`; the `sub_input` rules for `sub`/`ws_raw`,
+documented in §12.6/§12.7) and the complete stream's declared page chains
+are audited. A record that fails its schema rejects the run at its own seq
+(exit 2); a chain-level failure rejects the whole stream. Verified records
+are counted (`restVerified`, `subCount`, `wsRawCount`) and change no output
+byte. The live wire format itself is still unmeasured (G2/G4).
 
 ## 4. Session-class (field 290)
 
@@ -108,6 +111,8 @@ marks each previously observed symbol; release is per symbol at that symbol's
 own first later valid frame. An unresolved gap at session end is INCOMPLETE.
 The current input contract does not include a subscription list, so symbols
 that never produced a frame cannot be checked; live approval remains blocked.
+(The target §12.6 `activeSets` derivation over `sub` records is the
+basis the live subscription-set check will use.)
 
 ## 6. Signals
 
@@ -262,7 +267,9 @@ headers required to replay candidate selection. Never preserve credentials,
 tokens, Authorization headers, or login payloads; control messages are
 separate from market data. TLS, TCP framing and WS control frames are outside
 the raw evidence scope, so transport-level anomalies require explicit gap
-or failure records rather than inference from the payload alone.
+or failure records rather than inference from the payload alone. Each
+preserved WebSocket payload is recorded as one `ws_raw` record whose
+`payload_hex` is exactly these bytes.
 
 ### 12.3 Normalization cross-check
 
@@ -276,6 +283,12 @@ cross-check exists today because no producer exists.
 
 - `session_end` (M3) closes the stream and only that. It is not an
   approval; approval conditions are separate and live in GATES.md.
+- Minimum close evidence (scanner termination policy): at least one
+  observed `0s` FID 215 value in `{4, 8}` and a successful 0B REMOVE
+  acknowledgement (§12.6). FID 215 = 9 (전체장마감) occurs only after
+  18:00 and is recorded when observed but is never the minimum
+  evidence; a run reaching the scanner's post-close watchdog (15:40
+  KST) without a `{4,8}` observation ends INCOMPLETE, not normal.
 - `NO_TRIGGER_OBSERVED` applies only when every run approval condition in
   GATES.md is met and means "no trigger in the observed stream".
 - Without a verified provider sequence or completeness contract, absence in
@@ -287,9 +300,13 @@ cross-check exists today because no producer exists.
 Verified facts (see ASSUMPTIONS.md "Vendor facts"); none is implemented yet:
 
 - The only documented normal-close signal is the `0s` channel FID 215
-  (market-state notifications, values 2/4/8/9). Choosing it — or a
-  scanner-side clock — as the `session_end` authority is an open policy
-  decision; whatever is chosen must be a deterministic input record.
+  (market-state notifications). The evidenced values are the close
+  subset 2 (pre-close notice 15:20), 4 (close 15:30), 8 (regular
+  close), 9 (full close, only after 18:00); FID 215 carries further
+  operation-state values that are not yet evidenced (full value table
+  UNVERIFIED). Choosing it — or a scanner-side clock — as the
+  `session_end` authority is an open policy decision; whatever is
+  chosen must be a deterministic input record.
 - REG/REMOVE ACK exists (`return_code` 0/1). Waiting for it would make
   subscription confirmation an auditable input; the official client does
   not wait. This is a scanner-side policy choice, not a vendor constraint.
@@ -298,3 +315,70 @@ Verified facts (see ASSUMPTIONS.md "Vendor facts"); none is implemented yet:
   scanner-side evidence, never by trusting the stream.
 - The vendor SDK stays an external local installation (license); the
   recorder adapter boundary must not copy or modify vendor code.
+
+### 12.6 Subscription lifecycle (`sub` records: REG/REMOVE)
+
+The wire envelope follows the official example form — all 46 official
+examples (국내 38 + 미국 8) are exactly this shape: one REG request
+carries exactly one `{item, type}` entry whose `type` list has a single
+element, `refresh` `"1"` (the documented default), and `grp_no` `"1"`
+(every official example; the field's own description is empty, so its
+scope is UNVERIFIED). REMOVE is the same structure without `refresh`
+("해지(REMOVE)시 값 불필요"; official SDK `build_remove_packet`; no
+official REMOVE example exists). The `sub`/`ws_raw` record schemas and
+the composition functions are the single source of truth in
+`src/hs/sub_input.nim`; a `sub` record that fails its `(action, phase)`
+schema rejects the run at its own seq (§3).
+
+Scanner composition policy (`composeRegData`, `composeMarketStateReg`,
+`composeRemoveData`, `activeSets` in the same module):
+
+- The candidate REG is single-type: item = up then down codes (vendor
+  order), type `["0B"]`, caps ≤100 per direction and ≤200 total
+  (notice #49). The market-state REG is its own request: item = [],
+  type `["0s"]` (the official 0s example's channel-only form). A REG
+  mixing `0s` into a candidate replacement cannot be composed — the
+  composition makes the invariant "0s never appears in a 0B replacement
+  request" structural.
+- Candidate swap = REMOVE(outgoing 0B generation) →
+  ack(`return_code` 0) → REG(incoming 0B generation, refresh `"1"`) →
+  ack. `refresh: "0"` is never sent: the official wording ("0일경우
+  기존등록한 item/type은 해지") does not define the termination scope
+  (전역 / 같은 grp_no / 같은 type), so its effect is UNVERIFIED.
+- The end-of-session teardown REMOVE names the active 0B codes
+  (non-empty, the full generation — the same rule as the `(remove,req)`
+  record schema). `0s` is never a REMOVE target: its removal form is
+  undocumented, so the market-state channel ends with the connection
+  and its records stay available as close evidence.
+- `activeSets` derives the active subscription state from the recorded
+  stream deterministically: only acks with `return_code` 0 change state
+  (requests alone never do — fail-closed), an ack pairs with the oldest
+  unmatched request of the same `(gen, action)`, unmatched records are
+  no-ops, and a `refresh: "0"` request makes the set underivable
+  (rejected at its own seq). This is scanner-side bookkeeping, not a
+  vendor-behavior claim.
+
+UNVERIFIED (G2 mock subscription experiments before any live use):
+refresh=0's termination scope, grp_no scope semantics, REMOVE
+partial-removal behavior, and multi-type REG acceptance (no official
+precedent and no official prohibition).
+
+### 12.7 Kiwoom application-level PING
+
+- The server sends an application message with `trnm: "PING"`; the
+  official clients (portal samples in Python/Java/JavaScript and the
+  SDK's `_receive_non_ping_message`) respond by echoing the received
+  message back. The scanner sidecar echoes the received payload
+  **bytes** — stricter than the SDK, which re-serializes the parsed
+  dict (a logical echo).
+- Client-initiated RFC 6455 pings are disabled (`ping_interval=None`,
+  the official SDK's own `websockets` setting); the library still
+  answers server-side protocol pings. The Kiwoom PING is an
+  application message, distinct from RFC 6455 control frames, which are
+  outside the §12.2 evidence scope.
+- Every received PING is recorded as a `ws_raw` record (its `channel`
+  distinguishes it from `0B`/`0s` traffic), so the keep-alive period
+  becomes an observable. The period and the no-response policy are
+  officially undocumented — the 337-API spec JSON contains zero "ping"
+  mentions; the samples and SDK code are the only evidence — so both
+  are G2 observation items, never assumed.
