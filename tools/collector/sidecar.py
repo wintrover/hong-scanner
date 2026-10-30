@@ -300,9 +300,8 @@ class Sidecar:
                     ensure_ascii=False, separators=(",", ":")))
                 while True:
                     raw = await asyncio.wait_for(
-                        ws.recv(), timeout=self.ack_timeout)
-                    data = raw.encode("utf-8") if isinstance(raw, str) \
-                        else bytes(raw)
+                        ws.recv(decode=False), timeout=self.ack_timeout)
+                    data = bytes(raw)
                     await self.forward(data, self.conn_gen + 1)
                     try:
                         doc = json.loads(data.decode("utf-8"))
@@ -350,11 +349,8 @@ class Sidecar:
         import websockets
         try:
             while True:
-                raw = await ws.recv()
-                if isinstance(raw, str):
-                    data = raw.encode("utf-8")
-                else:
-                    data = bytes(raw)
+                raw = await ws.recv(decode=False)
+                data = bytes(raw)
                 await self.forward(data, gen)
                 if data.strip() == b"PING":
                     self.send_text(ws, data.decode("utf-8"))

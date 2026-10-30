@@ -172,11 +172,15 @@ class FakeWS:
     async def send(self, text):
         self.sent.append(text)
 
-    async def recv(self):
+    async def recv(self, decode=None):
         item = await self.inbox.get()
         if item is _CLOSE:
             raise FakeConnectionClosed(FakeFrame(self.close_code or 1000,
                                                  "test close"))
+        if decode is False and isinstance(item, str):
+            return item.encode("utf-8")
+        if decode is True and isinstance(item, bytes):
+            return item.decode("utf-8")
         return item
 
     async def close(self, code=1000):
