@@ -1,11 +1,13 @@
-## rest_resp fail-closed contract tests (VS-1 placeholder policy).
+## rest_resp fail-closed contract tests (undeclared/legacy payloads).
 ##
-## `replay.runCore` must never treat a recorded rest_resp as success: VS-1 has
-## no REST producer and the live wire format is unverified (G4), so every
-## rest_resp record -- success-shaped, failed, or unknown -- rejects the run
-## (exit 2) until a real producer is measured. Streams without rest_resp keep
-## their exact VS-1 behavior. Synthetic payloads only: no network, no vendor
-## data, no wall clock.
+## The validated acceptance path for schema-conforming rest_resp records
+## lives in test_rest_resp_contract.nim (REPLAY_CONTRACT §12.1: declared
+## request scope, page chain, preserved body bytes). These tests pin the
+## complementary rule: a rest_resp that does not parse against that declared
+## schema -- legacy payloads, empty objects, wrong types -- still rejects the
+## run (exit 2) at its own seq; nothing is silently accepted. Streams without
+## rest_resp keep their exact VS-1 behavior. Synthetic payloads only: no
+## network, no vendor data, no wall clock.
 ## Run: nim c -r --path:src tests/test_rest_failure_contract.nim
 import std/[os, strutils, tempfiles]
 import hs/[hcj, records, calendars, replay, verify, binfo]

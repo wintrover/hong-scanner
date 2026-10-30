@@ -26,6 +26,7 @@ run nim c -r --hints:off --warnings:off --path:src tests/test_provenance_contrac
 run nim c -r --hints:off --warnings:off --path:src tests/test_input_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_bars_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_rest_failure_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_rest_resp_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_vendor_input.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_recorder_contract.nim
 run bash tests/test_cli_contract.sh

@@ -49,9 +49,13 @@ Ignored by Core (three, diagnostic only):
 `ws_conn` describes how a connection changed; `gap` describes which data is
 untrustworthy. They are recorded separately and only `gap` has authority.
 
-Until the REST attempt-result contract and producer are verified, VS-1
-rejects every `rest_resp` rather than treating an unrecognized failure as
-success. VS-2 must replace this rejection with validated attempt handling.
+Until a live producer is measured, `rest_resp` follows a **validated
+acceptance path**: each record parses against the declared §12.1 schema and
+the complete stream's declared page chains are audited (single source of
+truth: the vendor_input rules). A record that fails the schema rejects the
+run at its own seq (exit 2); a chain-level failure rejects the whole stream.
+Verified pages are counted (`restVerified`) and change no output byte. The
+live wire format itself is still unmeasured (G2/G4).
 
 ## 4. Session-class (field 290)
 
@@ -213,7 +217,8 @@ does not contain market data.
 ## 12. Target additions beyond VS-1 (not implemented)
 
 Everything in this section is **target contract**. VS-1 has no live REST or
-WebSocket producer, and Core rejects `rest_resp`. Passing VS-1 proves none
+WebSocket producer; `rest_resp` records are schema-audited (§3), not
+live-verified. Passing VS-1 proves none
 of the statements below, and none describes current live behavior.
 
 ### 12.1 Candidate selection (ka10027)
@@ -248,7 +253,9 @@ The bytes preserved as evidence are exactly:
 - REST: the HTTP response **body** bytes.
 - WebSocket: the **application payload** bytes — RFC 6455 application data
   after de-framing and unmasking — not raw TCP bytes, not the frames, not
-  control frames.
+  control frames. In the `websockets` library this boundary is
+  `recv(decode=False)` (official docs confirm text messages also arrive as
+  bytes, after fragment reassembly).
 
 Preserve request metadata, response status, and the non-secret pagination
 headers required to replay candidate selection. Never preserve credentials,
@@ -274,3 +281,20 @@ cross-check exists today because no producer exists.
 - Without a verified provider sequence or completeness contract, absence in
   the stream is not evidence of absence in the market. Tick completeness
   is not claimed and cannot be verified from the client stream alone.
+
+### 12.5 Vendor facts that constrain the VS-2 design
+
+Verified facts (see ASSUMPTIONS.md "Vendor facts"); none is implemented yet:
+
+- The only documented normal-close signal is the `0s` channel FID 215
+  (market-state notifications, values 2/4/8/9). Choosing it — or a
+  scanner-side clock — as the `session_end` authority is an open policy
+  decision; whatever is chosen must be a deterministic input record.
+- REG/REMOVE ACK exists (`return_code` 0/1). Waiting for it would make
+  subscription confirmation an auditable input; the official client does
+  not wait. This is a scanner-side policy choice, not a vendor constraint.
+- No provider sequence or completeness contract exists, so approval
+  condition 3 (subscription confirmation) and U8 can only be closed by
+  scanner-side evidence, never by trusting the stream.
+- The vendor SDK stays an external local installation (license); the
+  recorder adapter boundary must not copy or modify vendor code.
