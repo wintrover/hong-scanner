@@ -13,6 +13,7 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | the standalone recorder is not a live collector | it is not wired to transport or the CLI; it does implement seal + commit marker + periodic fsync, but a live producer is VS-2 work | VS-2 |
 | a recorded `session_end` is not proof of durable completion | verify requires a valid commit marker only for a declared `environment`; synthetic streams report the marker state without enforcing it | VS-2 approval |
 | no WebSocket client exists in VS-1 | handshake, framing, masking, close codes are VS-2 work | VS-2 |
+| the consumption check has a no-sub boundary | it applies to `0B` `ws_raw` ticks only; a stream with `0B` ticks but no subscription evidence at all has every tick quarantined (an honest result), and `ws_frame` synthetic ticks (VS-1) are not checked — the existing synthetic gate passes unharmed | tools/collector/README.md §10 |
 | strategy validity is not established | synthetic fixtures are not evidence of market behavior or profitability | PH-2 |
 | `breakdown_bp` is parsed but not applied | its reference and comparison are undefined, so bearish candidates are held instead of emitted | strategy contract |
 | strategy evidence windows are not a market-validity proof | tainted evidence is held within each algorithm's dependency window, but thresholds and actual vendor field semantics still require validation | PH-1/PH-2 |

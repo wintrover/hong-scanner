@@ -36,8 +36,10 @@
 ## key repeat, page cap, missing/truncated continuation) come from the same
 ## code path; the stream-level order audit (pages 1..N per declared scope,
 ## one chain per scope per stream) lives here. A scope that restarts its
-## chain is rejected fail-closed: the refresh cadence is not yet a declared,
-## approved quantity (§12.1).
+## chain is rejected fail-closed unless the stream's config record declares
+## the re-poll cadence (config.repoll_seconds -- the "approved extension
+## path", README §6.1): declared, each page-1 record opens a new audited
+## round; undeclared, the restart stays a REJECT.
 ##
 ## Failure classes reuse VendorFailure. vfSecret has no carrier in this
 ## record shape: no field can hold a credential, so nothing can leak one.
@@ -241,13 +243,23 @@ proc scopeKey*(scope: Ka10027Query): string =
   canonical(ka10027RequestBody(scope))
 
 proc verifyAttempts*(attempts: seq[RestRespAttempt];
-                     pageCap: int = defaultPageCap): seq[RestRespAttempt] =
+                     pageCap: int = defaultPageCap;
+                     pollSeconds: int = 0): seq[RestRespAttempt] =
   ## Audit the declared page chains of a complete stream and return the
   ## verified attempts (confirmed success, in stream order). Any failure
   ## raises; a partial result is never returned. Per declared scope, in
   ## stream order: pages must run 1..N without gaps, duplicates or restarts,
   ## and the whole chain must pass vendor_input.normalizeChain -- the same
   ## success affirmation and cont-yn/page-cap rules as the vendor layer.
+  ##
+  ## pollSeconds is the config-declared re-poll cadence (README §6.1, the
+  ## "approved extension path" rest_resp reserves). 0 (undeclared) keeps the
+  ## historical single-chain rule: a page-1 restart inside a scope is a
+  ## REJECT. Declared (> 0), each page-1 record opens a new round of that
+  ## scope's chain -- the initial lookup and the re-poll rounds coexist --
+  ## and every round is itself audited as a full 1..N chain with a terminal
+  ## cont_yn (normalizeChain), so an unterminated re-poll chain is still
+  ## never a success.
   if attempts.len == 0: return
   var keys: seq[string]
   var groups: seq[seq[RestRespAttempt]]
@@ -263,7 +275,8 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
       groups.add(@[])
       gi = keys.len - 1
     groups[gi].add(a)
-  for g in groups:
+  proc auditChain(g: seq[RestRespAttempt]): seq[RestRespAttempt] =
+    if g.len == 0: return
     if g[0].page != 1:
       raise rerr(g[0].seqNo, vfContract,
                  "declared page chain does not start at page 1 (first " &
@@ -294,4 +307,25 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
                  " page(s)): " & e.msg)
     for a in g:
       result.add(a)
+  for g in groups:
+    if pollSeconds <= 0:
+      for a in auditChain(g):
+        result.add(a)
+    else:
+      # Declared cadence: split the scope's stream-order pages into rounds
+      # at each page-1 record and audit every round on its own.
+      var rounds: seq[seq[RestRespAttempt]]
+      for a in g:
+        if a.page == 1:
+          rounds.add(@[a])
+        else:
+          if rounds.len == 0:
+            raise rerr(a.seqNo, vfContract,
+                       "declared page chain does not start at page 1 (first " &
+                       "recorded index " & $a.page & "): a chain without " &
+                       "its first page is missing data; rejected fail-closed")
+          rounds[^1].add(a)
+      for r in rounds:
+        for a in auditChain(r):
+          result.add(a)
   result.sort(proc (a, b: RestRespAttempt): int = cmp(a.seqNo, b.seqNo))

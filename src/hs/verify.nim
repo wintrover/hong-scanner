@@ -29,6 +29,11 @@ type
     ## (see verifyRun) only when the stream's config declares an
     ## environment.
     commitState*: string
+    ## The §10 consumption-check report line ("" when the stream carries no
+    ## subscription evidence). Reporting only — quarantine is not a REJECT
+    ## and this line never changes the verdict (tools/collector/README.md
+    ## §10).
+    subcheckLine*: string
 
   OutputGuardError* = object of CatchableError
   RunArtifact* = tuple[name, data: string]
@@ -465,6 +470,14 @@ proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
   let env = declaredEnvironment(recs)
   try:
     let res = runCore(recs)
+    # The §10 consumption-check report: populated whenever the stream
+    # carries subscription evidence, whatever the verdict. Reporting only.
+    if res.subCount > 0 or res.wsRawCount > 0:
+      result.subcheckLine = "SUBCHECK quarantined=" & $res.quarantined &
+        " reg_acks_0b=" & $res.regAcks0B &
+        " remove_acks_0b=" & $res.removeAcks0B &
+        " close_values=" & (if res.closeValues.len == 0: "none"
+                            else: res.closeValues.join(","))
     case res.status
     of rsIncomplete:
       result.verdict = vIncomplete

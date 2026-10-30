@@ -66,6 +66,8 @@ proc cmdVerify(runDir: string): int =
   echo verdictLine(r)
   if r.commitState.len > 0:
     echo "COMMIT=" & r.commitState
+  if r.subcheckLine.len > 0:
+    echo r.subcheckLine
   for issue in r.issues:
     stderr.writeLine("  issue: " & issue)
   exitCode(r.verdict)

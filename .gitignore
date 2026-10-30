@@ -15,3 +15,10 @@ tests/test_rest_failure_contract
 tests/test_rest_resp_contract
 tests/test_vendor_input
 tests/test_sub_input_contract
+tests/test_tickwire_contract
+tests/test_subcheck_contract
+tests/test_collector_contract
+tests/test_collector_stream_contract
+tools/collector/.venv/
+tools/collector/collector
+tools/collector/__pycache__/
