@@ -1,17 +1,23 @@
-## Recorder contract regression tests (VS-2 smallest recorder slice:
+## Recorder contract regression tests (VS-2 recorder slice:
 ## exclusive create at 0o600, single-writer handle state, ordered
-## complete-LF records, explicit finish + fsync, non-destructive abnormal
-## termination / INCOMPLETE, fail-closed torn writes, torn-tail refusal,
-## and the pinned — NOT solved — seal/durability ambiguity).
-## Synthetic only: no network, no real market data, no wall clock. Every
-## case works in its own unique temp dir (createTempDir, never removed) —
+## complete-LF records, the durable-completion finish protocol (data fsync
+## -> seal -> seal fsync -> directory fsync -> COMMITTED marker -> marker
+## fsync -> directory fsync -> close), syncNow heartbeat, non-destructive
+## abnormal termination / INCOMPLETE, fail-closed torn writes, torn-tail
+## refusal, and readCommitMarker's VALID/ABSENT/INVALID verdicts — the
+## marker is the evidence that distinguishes a durable finish from a
+## seal whose durability is unconfirmed).
+## Synthetic only: no network, no real market data. Marker timestamps are
+## checked for format, never for their wall-clock values. Every case
+## works in its own unique temp dir (createTempDir, never removed) —
 ## nothing here deletes anything or follows anything outside its dir.
-## Coverage note: the fsync-failure raise path (SealUnverifiedError) has no
-## synthetic trigger on this platform; that ambiguity is pinned here
-## instead as a byte-identical indistinguishability fact.
+## Coverage note: the fsync-failure raise paths (SealUnverifiedError) have
+## no synthetic trigger on this platform; that protocol half is pinned
+## instead through its observable outcomes — the marker's presence,
+## content and the ABSENT/INVALID verdicts it yields.
 ## Run: nim c -r --path:src tests/test_recorder_contract.nim
 import std/[os, strutils, tempfiles, posix]
-import hs/[hcj, records, replay, verify, recorder]
+import hs/[hcj, digest, records, replay, verify, recorder, sub_input]
 
 var failures = 0
 var passes = 0
@@ -263,44 +269,238 @@ block tornWritePoison:
         e2 == nil)
   check("teardown changed no byte of the torn file", readFile(p) == torn)
 
-# --------------------------- seal vs durable completion (pinned limit)
-block sealAmbiguityLimit:
-  ## Pinned as an executable fact, NOT solved: finish() writes the
-  ## session_end bytes before it fsyncs, so a failed fsync leaves a file
-  ## that looks normally sealed — byte-identical to a durable finish. No
-  ## inspection this module offers (readRecorderFile, isSealed, the core)
-  ## can tell the two apart, this module produces no separate
-  ## durable-completion evidence and no atomic completion protocol is
-  ## claimed: approving a sealed file as a complete run needs evidence from
-  ## outside this module.
-  let d = workDir("seal-ambiguity")
-  let durablePath = d / "durable.hcj.jsonl"
+# --------------------- durable completion: seal + COMMITTED marker
+block commitMarkerDurability:
+  ## The durable-completion contract, observed through its on-disk
+  ## outcomes: a real finish() creates the sibling COMMITTED marker whose
+  ## run_id/seq/sha256 match the sealed log, and a sealed file *without* a
+  ## marker — the state a failed fsync or a crash mid-protocol leaves, and
+  ## the state the old "suspect file" test pinned — stays byte-identical
+  ## to the durable log at the file level, so the marker is the ONLY
+  ## distinguishing evidence between "durable finish" and "termination
+  ## recorded, durability unconfirmed".
+
+  proc markerFor(path: string): HcjValue =
+    ## The marker content finish() must produce for `path`, computed the
+    ## way an external verifier would: from the log's own bytes.
+    hObj(("run_id", hStr(lastPathPart(parentDir(path)))),
+         ("schema", hStr(commitMarkerSchema)),
+         ("seq", hInt(loadRecords(path).len)),
+         ("sha256", hStr(sha256Hex(readFile(path)))),
+         ("t", hStr("2026-10-29T15:30:00+09:00")))
+
+  let d = workDir("commit")
+  let durablePath = d / "input.hcj.jsonl"
   var a = openRecorder(durablePath)
   discard a.append(kCalendar, goodCal)
   discard a.append(kConfig, cfgRaw)
   check("the durable recorder finished its protocol",
         a.finish() == 3 and a.finished() and not a.failed())
+  let markerPath = durablePath & ".committed"
+  check("finish created the sibling COMMITTED marker", fileExists(markerPath))
+  let markerLine = readFile(markerPath)
+  check("the marker is one canonical HCJ line + LF",
+        markerLine == canonical(parseDoc(markerLine)) & "\n")
+  let m = parseDoc(markerLine)
+  check("the marker carries exactly the declared schema fields",
+        m.has("run_id") and m.has("schema") and m.has("seq") and
+        m.has("sha256") and m.has("t") and m.pairs.len == 5)
+  check("the marker names the log's run directory as run_id",
+        m.get("run_id").asStr == lastPathPart(parentDir(durablePath)))
+  check("the marker pins the schema version",
+        m.get("schema").asStr == commitMarkerSchema)
+  check("the marker's seq is the sealed record count, seal included",
+        m.get("seq").asInt == 3)
+  check("the marker's sha256 matches the sealed log bytes",
+        m.get("sha256").asStr == sha256Hex(readFile(durablePath)))
+  check("the marker's t is an ISO 8601 timestamp with a numeric offset",
+        validIso8601Offset(parseDoc(markerLine).get("t").asStr))
+  let cm = readCommitMarker(durablePath)
+  check("readCommitMarker verdicts the finished log VALID",
+        cm.status == csValid and cm.reason == "")
+  check("the VALID verdict carries the marker's own fields",
+        cm.runId == lastPathPart(parentDir(durablePath)) and cm.seq == 3 and
+        cm.sha256 == sha256Hex(readFile(durablePath)))
+  check("finish refused to run twice on the sealed recorder",
+        caught(proc () = discard a.finish()) != nil)
+  checkErr("append after finish is still refused", proc () =
+    discard a.append(kPong, hNull()))
 
+  # The old pinned hazard, now resolvable: a sealed file with no marker —
+  # exactly what a failed fsync / crashed finish leaves — is byte-level
+  # indistinguishable from the durable log, but the marker verdicts split
+  # them.
   let suspectPath = d / "suspect.hcj.jsonl"
   var b = openRecorder(suspectPath)
   discard b.append(kCalendar, goodCal)
   discard b.append(kConfig, cfgRaw)
   b.abandon() # crash before any seal
-  # The on-disk state a failed fsync leaves behind: seal bytes present,
-  # durability unknown.
   writeFile(suspectPath, readFile(suspectPath) &
             makeRecordLine(3, kSessionEnd, hNull()) & "\n")
-
   check("the suspect file is byte-identical to the durable one",
         readFile(suspectPath) == readFile(durablePath))
   let rd = readRecorderFile(durablePath)
   let rs = readRecorderFile(suspectPath)
-  check("no file-level inspection in this module tells them apart",
+  check("file-level inspection still cannot tell them apart",
         isSealed(rd) and isSealed(rs) and validates(rd) and validates(rs))
   let cd = tryCoreStatus(rd)
   let cs = tryCoreStatus(rs)
-  check("the core would approve both equally (the pinned hazard)",
+  check("the core still approves both equally on the bytes alone",
         cd.ok and cs.ok and cd.status == rsOk and cs.status == rsOk)
+  let vd = readCommitMarker(durablePath)
+  let vs = readCommitMarker(suspectPath)
+  check("the marker verdict separates them: VALID vs ABSENT",
+        vd.status == csValid and vs.status == csAbsent)
+  check("ABSENT states the durability boundary",
+        "no commit marker file" in vs.reason)
+
+  # A marker already at the marker path is prior evidence: finish refuses
+  # instead of overwriting it, and the planted bytes survive.
+  let foreignPath = d / "foreign.hcj.jsonl"
+  var c = openRecorder(foreignPath)
+  discard c.append(kCalendar, goodCal)
+  writeFile(foreignPath & ".committed",
+            canonical(markerFor(foreignPath)) & "\n")
+  let planted = readFile(foreignPath & ".committed")
+  checkErr("finish refuses a pre-existing marker instead of overwriting",
+           proc () = discard c.finish())
+  check("the refusal left the planted marker untouched",
+        readFile(foreignPath & ".committed") == planted)
+  check("the refused finish left the recorder closed and unfinished",
+        not c.finished() and caught(proc () = c.abandon()) != nil)
+
+# ------------------------------------- syncNow: heartbeat without a seal
+block syncNowHeartbeat:
+  let d = workDir("syncnow")
+  let path = d / "input.hcj.jsonl"
+  var r = openRecorder(path)
+  discard r.append(kCalendar, goodCal)
+  let before = readFile(path)
+  syncNow(r)
+  check("syncNow wrote nothing — no seal, no marker, same bytes",
+        readFile(path) == before and
+        not fileExists(path & ".committed"))
+  discard r.append(kConfig, cfgRaw)
+  let mid = readRecorderFile(path)
+  check("the recorder stays usable after syncNow (no poisoning)",
+        r.seqNo() == 2 and mid.len == 2 and not isSealed(mid))
+  r.abandon()
+  checkErr("syncNow after abandon is refused", proc () = syncNow(r))
+  var f = openRecorder(d / "finished.hcj.jsonl")
+  discard f.append(kCalendar, goodCal)
+  discard f.finish()
+  checkErr("syncNow after finish is refused", proc () = syncNow(f))
+
+# ----------------------- readCommitMarker: schema + log cross-checks
+block commitMarkerVerdicts:
+  let d = workDir("verdicts")
+  let path = d / "input.hcj.jsonl"
+  var r = openRecorder(path)
+  discard r.append(kCalendar, goodCal)
+  discard r.append(kConfig, cfgRaw)
+  discard r.finish()
+  let markerPath = path & ".committed"
+  let goodMarker = readFile(markerPath)
+
+  proc plantMarker(content: string) =
+    writeFile(markerPath, content)
+
+  proc verdictIs(status: CommitStatus; needle: string) =
+    let cm = readCommitMarker(path)
+    if cm.status != status:
+      check("verdict " & $status & " (" & needle & ")", false)
+      echo "     got ", $cm.status, ": ", cm.reason
+    else:
+      check("verdict " & $status & " (" & needle & ")",
+            needle.len == 0 or needle in cm.reason)
+
+  verdictIs(csValid, "")
+
+  # A log tampered after the marker: torn tail -> the marker cannot
+  # honestly match -> INVALID with the reason preserved.
+  plantMarker(goodMarker)
+  let good = readFile(path)
+  writeFile(path, good & "{")
+  verdictIs(csInvalid, "not a readable record stream")
+  writeFile(path, good)
+
+  # A marker whose fields disagree with the log, one field at a time.
+  proc mutateField(name: string; value: HcjValue) =
+    var m = parseDoc(goodMarker)
+    for p in m.pairs.mitems:
+      if p.k == name: p.v = value
+    plantMarker(canonical(m) & "\n")
+
+  plantMarker(goodMarker)
+  mutateField("sha256", hStr(repeat('0', 64)))
+  verdictIs(csInvalid, "sha256 does not match")
+  plantMarker(goodMarker)
+  mutateField("seq", hInt(7))
+  verdictIs(csInvalid, "seq does not match")
+  plantMarker(goodMarker)
+  mutateField("run_id", hStr("elsewhere"))
+  verdictIs(csInvalid, "run_id does not name")
+  plantMarker(goodMarker)
+  mutateField("schema", hStr("hong-scanner-commit/2"))
+  verdictIs(csInvalid, "schema is not")
+  plantMarker(goodMarker)
+  mutateField("t", hStr("2026-10-29T15:30:00"))
+  verdictIs(csInvalid, "not an ISO 8601")
+  plantMarker(goodMarker)
+  mutateField("seq", hInt(0))
+  verdictIs(csInvalid, "must be >= 1")
+  plantMarker(goodMarker)
+  mutateField("sha256", hStr("DEADBEEF"))
+  verdictIs(csInvalid, "64 lowercase hex")
+
+  var m = parseDoc(goodMarker)
+  m.pairs.add(("extra", hStr("x")))
+  plantMarker(canonical(m) & "\n")
+  verdictIs(csInvalid, "unknown marker field: extra")
+
+  m = parseDoc(goodMarker)
+  var keep: seq[HcjPair]
+  for p in m.pairs:
+    if p.k != "t": keep.add(p)
+  m.pairs = keep
+  plantMarker(canonical(m) & "\n")
+  verdictIs(csInvalid, "missing field: t")
+
+  m = parseDoc(goodMarker)
+  for p in m.pairs.mitems:
+    if p.k == "seq": p.v = hStr("3")
+  plantMarker(canonical(m) & "\n")
+  verdictIs(csInvalid, "seq is not an integer")
+
+  plantMarker("{\"kind\": \"marker\", ")
+  verdictIs(csInvalid, "not valid HCJ JSON")
+
+  plantMarker(canonical(hNull()))
+  verdictIs(csInvalid, "not a JSON object")
+
+  # A marker whose log is missing entirely: INVALID, not ABSENT — the
+  # marker refers to a log that is not there (no deletion involved: the
+  # log is simply never created at this path).
+  let ghost = d / "ghost.hcj.jsonl"
+  writeFile(ghost & ".committed",
+            canonical(hObj(("run_id", hStr(lastPathPart(d))),
+                           ("schema", hStr(commitMarkerSchema)),
+                           ("seq", hInt(3)), ("sha256", hStr(repeat('a', 64))),
+                           ("t", hStr("2026-10-29T15:30:00+09:00")))) & "\n")
+  let ghostV = readCommitMarker(ghost)
+  check("a marker without its log is INVALID, not ABSENT",
+        ghostV.status == csInvalid and
+        "not a readable record stream" in ghostV.reason)
+
+  # ABSENT needs no marker file at all (the pre-marker contract shape).
+  let bare = d / "bare.hcj.jsonl"
+  var b = openRecorder(bare)
+  discard b.append(kCalendar, goodCal)
+  b.abandon()
+  let bareV = readCommitMarker(bare)
+  check("a log with no marker file is ABSENT",
+        bareV.status == csAbsent and
+        "no commit marker file" in bareV.reason)
 
 # --------------------- abnormal termination: non-destructive / INCOMPLETE
 block abnormalTermination:

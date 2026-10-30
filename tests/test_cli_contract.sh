@@ -238,6 +238,111 @@ assert_eq "replay without flags exits 2" 2 "$RC"
 RC="$("$BIN" frobnicate >/dev/null 2>&1; echo $?)"
 assert_eq "unknown command exits 2" 2 "$RC"
 
+# ------------------------------------------- environment + commit marker
+echo "--- environment + commit marker"
+
+# The durable-recorder verify rules: a stream whose config declares
+# environment requires a COMMITTED marker next to input.hcj.jsonl —
+# sealed + VALID marker = completable, marker ABSENT = INCOMPLETE (exit
+# 4), marker not matching the log = REJECT (exit 2). The marker here is
+# hand-built the way any external verifier would: from the log's own
+# bytes. Synthetic streams (no environment) keep their behavior
+# unchanged and only get the marker reported.
+
+python3 - "$REPO_ROOT/fixtures/smoke/input.hcj.jsonl" "$WORK/envstream.hcj.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    records = [json.loads(line) for line in f]
+records[1]["raw"]["environment"] = "demo"
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    for seq, record in enumerate(records, 1):
+        record["seq"] = seq
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+python3 - "$REPO_ROOT/fixtures/smoke/input.hcj.jsonl" "$WORK/envbad.hcj.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    records = [json.loads(line) for line in f]
+records[1]["raw"]["environment"] = "staging"
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    for seq, record in enumerate(records, 1):
+        record["seq"] = seq
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+# The environment field is validated at replay: only "demo"/"prod".
+RC=0; (cd "$WORK" && "$BIN" replay --in envstream.hcj.jsonl --out runs/envbase >/dev/null 2>&1) || RC=$?
+assert_eq "replay accepts an environment-declaring stream" 0 "$RC"
+RC=0; ERR="$(cd "$WORK" && "$BIN" replay --in envbad.hcj.jsonl --out runs/envbad 2>&1)" || RC=$?
+assert_eq "replay rejects an invalid environment with exit 2" 2 "$RC"
+assert_contains "the rejection names config.environment" "$ERR" "config.environment is not demo|prod"
+
+write_marker() { # $1 = run dir whose input artifact the marker pins
+  python3 - "$1" <<'PY'
+import hashlib, json, os, sys
+run = sys.argv[1]
+inp = os.path.join(run, "input.hcj.jsonl")
+n = sum(1 for _ in open(inp, encoding="utf-8"))
+sha = hashlib.sha256(open(inp, "rb").read()).hexdigest()
+marker = {"run_id": os.path.basename(run),
+          "schema": "hong-scanner-commit/1", "seq": n, "sha256": sha,
+          "t": "2026-10-29T15:30:00+09:00"}
+with open(inp + ".committed", "w", encoding="utf-8") as f:
+    f.write(json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+RC=0; OUT="$(cd "$WORK" && "$BIN" verify --run runs/envbase 2>"$SANDBOX/env.err")" || RC=$?
+assert_eq "environment without a marker verifies INCOMPLETE exit 4" 4 "$RC"
+assert_contains "the ABSENT marker is reported" "$OUT" "COMMIT=ABSENT"
+assert_contains "the ABSENT issue explains durability" "$(cat "$SANDBOX/env.err")" "commit marker absent"
+
+write_marker "$WORK/runs/envbase"
+RC=0; OUT="$(cd "$WORK" && "$BIN" verify --run runs/envbase 2>/dev/null)" || RC=$?
+assert_eq "environment + VALID marker keeps the success path (7 dev provenance)" 7 "$RC"
+assert_contains "the VALID marker is reported" "$OUT" "COMMIT=VALID"
+
+python3 - "$WORK/runs/envbase/input.hcj.jsonl.committed" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p, encoding="utf-8"))
+m["sha256"] = "0" * 64
+with open(p, "w", encoding="utf-8") as f:
+    f.write(json.dumps(m, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+RC=0; OUT="$(cd "$WORK" && "$BIN" verify --run runs/envbase 2>"$SANDBOX/inv.err")" || RC=$?
+assert_eq "environment + mismatching marker verifies REJECT exit 2" 2 "$RC"
+assert_contains "the INVALID marker is reported" "$OUT" "COMMIT=INVALID"
+assert_contains "the INVALID issue explains the mismatch" "$(cat "$SANDBOX/inv.err")" "commit marker INVALID"
+
+python3 - "$WORK/runs/envbase/input.hcj.jsonl.committed" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p, encoding="utf-8"))
+m["seq"] = 3
+with open(p, "w", encoding="utf-8") as f:
+    f.write(json.dumps(m, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+RC="$(cd "$WORK" && "$BIN" verify --run runs/envbase >/dev/null 2>&1; echo $?)"
+assert_eq "a marker seq mismatch is also REJECT exit 2" 2 "$RC"
+
+# Torn tail on an environment stream: crashed run, INCOMPLETE (never an
+# approval, never the synthetic line-discipline REJECT).
+RC=0; (cd "$WORK" && "$BIN" replay --in envstream.hcj.jsonl --out runs/envtorn >/dev/null 2>&1) || RC=$?
+assert_eq "the torn-tail run replays cleanly first" 0 "$RC"
+printf '{' >> "$WORK/runs/envtorn/input.hcj.jsonl"
+RC=0; ERR="$(cd "$WORK" && "$BIN" verify --run runs/envtorn 2>&1 >/dev/null)" || RC=$?
+assert_eq "a torn tail on an environment stream is INCOMPLETE exit 4" 4 "$RC"
+assert_contains "the torn tail is named as a crashed run" "$ERR" "torn tail"
+
+# Synthetic stream: behavior unchanged, marker only reported.
+RC=0; (cd "$WORK" && "$BIN" replay --in fixtures/smoke/input.hcj.jsonl --out runs/plain >/dev/null 2>&1) || RC=$?
+assert_eq "the synthetic stream replays as before" 0 "$RC"
+RC=0; OUT="$(cd "$WORK" && "$BIN" verify --run runs/plain 2>/dev/null)" || RC=$?
+assert_eq "a synthetic stream verifies as before (7 dev provenance)" 7 "$RC"
+assert_contains "its absent marker is only reported" "$OUT" "COMMIT=ABSENT"
+
 # ---------------------------------------------------------------- summary
 echo ""
 echo "$PASS passed, $FAILED failed"

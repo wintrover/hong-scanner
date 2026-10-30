@@ -64,6 +64,8 @@ proc cmdVerify(runDir: string): int =
     fail(2, "verify requires an existing --run directory")
   let r = verifyRun(runDir)
   echo verdictLine(r)
+  if r.commitState.len > 0:
+    echo "COMMIT=" & r.commitState
   for issue in r.issues:
     stderr.writeLine("  issue: " & issue)
   exitCode(r.verdict)

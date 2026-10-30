@@ -1,11 +1,13 @@
 ## Record envelope, kind classification and the single-seq contract.
 ## Contract: plan §3.0 (kinds) and §3.1 (one counter, gauge semantics).
+## VS-2 adds two consumed subscription-evidence kinds (sub, ws_raw,
+## schemas in sub_input.nim); the ignored set is unchanged.
 import std/strutils
 import hcj
 
 type
   Kind* = enum
-    kCalendar, kConfig, kWsFrame, kRestResp, kGap, kSessionEnd,
+    kCalendar, kConfig, kWsFrame, kRestResp, kGap, kSessionEnd, kSub, kWsRaw,
     kOutFrame, kWsConn, kPong
 
   Record* = object
@@ -16,7 +18,8 @@ type
   RecordError* = object of CatchableError
 
 const
-  consumedKinds* = {kCalendar, kConfig, kWsFrame, kRestResp, kGap, kSessionEnd}
+  consumedKinds* = {kCalendar, kConfig, kWsFrame, kRestResp, kGap, kSessionEnd,
+                    kSub, kWsRaw}
   ignoredKinds* = {kOutFrame, kWsConn, kPong}
 
 proc rerr(msg: string): ref RecordError = newException(RecordError, msg)
@@ -29,6 +32,8 @@ proc kindName*(k: Kind): string =
   of kRestResp: "rest_resp"
   of kGap: "gap"
   of kSessionEnd: "session_end"
+  of kSub: "sub"
+  of kWsRaw: "ws_raw"
   of kOutFrame: "out_frame"
   of kWsConn: "ws_conn"
   of kPong: "pong"
@@ -41,6 +46,8 @@ proc parseKind*(s: string): Kind =
   of "rest_resp": kRestResp
   of "gap": kGap
   of "session_end": kSessionEnd
+  of "sub": kSub
+  of "ws_raw": kWsRaw
   of "out_frame": kOutFrame
   of "ws_conn": kWsConn
   of "pong": kPong

@@ -32,6 +32,11 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | P8 | candidates are queried via `ka10027` with `stex_tp="1"` and one query per direction (`sort_tp="1"`/`"3"`); query scope and page upper limit are declared and recorded (VS-2 target, no producer yet) | any other universe or uncapped pagination (unapproved) |
 | P9 | approval is a separate decision with its own conditions (GATES); `session_end` and `VERDICT MATCH` never imply approval | treat MATCH as approval (rejected) |
 | P10 | `NO_TRIGGER_OBSERVED` is only for complete, valid runs, and only describes the observed stream | read zero signals as market-level absence (rejected: tick completeness is not guaranteed) |
+| P11 | the config record may declare `environment` (`demo` or `prod`); verify enforces the commit-marker gate only for a declared environment, and synthetic streams report the marker state without enforcing it | enforcing the marker gate on synthetic streams (rejected: CI has no recorder) |
+| P12 | durable completion = sealed artifacts + a valid commit marker (`hong-scanner-commit/1`); "recorded" never implies "committed" | trusting the seal alone (rejected: the fsync window leaves the state ambiguous) |
+| P13 | the commit marker's `t` is the only wall-clock input at the recorder adapter boundary; Core still has none | timestamps in Core (rejected: M1) |
+| P14 | subscription REGs are single-type in the official example form, refresh `"1"`, grp_no `"1"`; `0s` is registered by its own REG and never enters a 0B replacement request; a swap is REMOVE(outgoing) → ack → REG(incoming, refresh `"1"`) → ack; refresh `"0"` is never sent | multi-type REG with 0s auto-added (rejected: no official precedent, V1) |
+| P15 | subscription confirmation records REG/REMOVE acks; `activeSets` reflects ack `return_code` 0 only | trusting requests alone (rejected: a request is not evidence) |
 
 ## IMPLEMENTATION CHOICE (free to change without breaking the contract)
 
@@ -57,6 +62,9 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | U7 | durability under power loss | VS-2 drill |
 | U8 | whether the live feed drops ticks silently (0B delivery completeness) — no provider sequence or completeness contract exists (full-text search of all 337 API specs: zero hits), so client logs alone cannot prove absence | G2: WS-derived volume vs REST `acc_trde_qty` |
 | U9 | an adequate ka10027 page upper limit (candidates missed by the cap) | PH-1 / G2 |
+| U10 | refresh=0's termination scope, grp_no scope semantics, REMOVE partial-removal behavior, multi-type REG acceptance (official wording absent for all four) | G2 mock subscription experiments |
+| U11 | Kiwoom PING period and no-response policy | G2 (ws_raw PING records) |
+| U12 | the full FID 215 value table beyond the evidenced close subset {2, 4, 8, 9} | G2 observation |
 
 ## Vendor facts (official sources, 2026-10-30)
 
@@ -65,19 +73,74 @@ sources), PyPI metadata, and websockets/keyring documentation. These are
 trust facts: cite them, do not re-derive them. Live confirmation of each
 still requires G2 credentials.
 
+- REG/REMOVE wire form (official spec JSON, SDK `packets.py`, portal
+  guide): REG = `{trnm:"REG", grp_no, refresh, data:[{item, type}]}`;
+  REMOVE is the same structure without refresh (SDK
+  `build_remove_packet`; no official REMOVE example exists). refresh
+  (한글명 기존등록유지여부, required) 원문: "등록(REG)시 0:기존유지안함
+  1:기존유지(Default) 0일경우 기존등록한 item/type은 해지, 1일경우
+  기존등록한 item/type 유지 해지(REMOVE)시 값 불필요". The termination
+  scope of refresh=0 (전역 / 같은 grp_no / 같은 type) has no official
+  wording (UNVERIFIED). grp_no (그룹번호) has an empty description; all
+  46 official examples (국내 38 + 미국 8) pin "1". Every official
+  example is a single-type REG (one `{item, type}` entry, refresh "1");
+  a multi-type REG has no official precedent and no official prohibition
+  (UNVERIFIED). REMOVE partial removal is undocumented (UNVERIFIED).
 - REG/REMOVE ACK exists (`return_code` 0 normal / 1 error, sent only on
   register/remove); the official client does not wait for it — only LOGIN
   has a dedicated ack wait. Subscription confirmation is therefore possible
   in principle, but waiting for it is a scanner-side policy decision.
 - The `0s` channel (registered with no symbols) delivers market-state
-  FID 215 (2 pre-close notice 15:20, 4 close 15:30, 8 regular-close,
-  9 full close after 18:00). It is the only documented normal-close signal;
-  no ordering guarantee vs `0B` frames.
-- PING echoes the received payload; the keep-alive period is not documented.
-  `trnm=SYSTEM` terminates the stream in the official client; its meaning is
-  undocumented. A server close has no documented semantics.
-- The mock API still requires portal-issued demo appkey/secretkey (mode
-  mismatch 8030/8031; mock-unsupported 8104).
+  FID 215. The evidenced values are the close subset 2 (pre-close notice
+  15:20), 4 (close 15:30), 8 (regular close), 9 (full close, only after
+  18:00); the full value table is larger and UNVERIFIED. It is the only
+  documented normal-close signal; no ordering guarantee vs `0B` frames.
+- Kiwoom application-level PING: the server sends `trnm:"PING"` and the
+  official clients echo it back (portal samples in three languages,
+  "수신값 그대로 송신"; the SDK `_receive_non_ping_message` re-sends the
+  parsed message — a logical echo re-serialized via json.dumps). The
+  evidence is the samples and SDK code only: the 337-API spec JSON has
+  zero "ping" mentions. The SDK connects with `ping_interval=None`
+  (client-initiated RFC 6455 pings off; the library still answers
+  server-side protocol pings). The PING period and no-response policy
+  are undocumented (UNVERIFIED). `trnm=SYSTEM` terminates the stream in
+  the official client; its meaning is undocumented. A server close has
+  no documented semantics.
+- Mock vs real (portal 모의투자 이용안내 · 서비스 이용안내 · notices ·
+  spec JSON · SDK): 모의투자 is a "가상 매매 시스템" and Kiwoom
+  recommends "디버깅과 테스트를 위하여 실제 환경 적용 전에 모의투자로
+  접속하여 충분한 테스트" — a test stage, not an equivalent feed. No
+  official statement claims mock-feed identity with the production feed
+  (UNVERIFIED); the opposite direction is documented — notice #48:
+  "(단, 모의투자의 경우 제공 기능 및 데이터에 일부 차이가 있을 수
+  있습니다.)". NXT trading is mock-unsupported (시세만 제공). Error
+  codes: 8104 "모의투자에서 지원하지 않는 API 입니다.", 8030/8031
+  투자구분(실전/모의) mismatch. Domains: mock REST
+  `https://mockapi.kiwoom.com`; mock WS `wss://mockapi.kiwoom.com:10000`
+  (SDK `DEFAULT_WS_BASE_URLS["demo"]`). "실제 투자와 모의투자 App Key를
+  별도로 관리합니다." Mock rate limit: TR 1초 1회 per account/토큰
+  (notice #49). The 모의투자 운영규정 text itself is UNVERIFIED (SPA, not
+  statically retrievable).
+- Durability evidence (man-pages, POSIX.1-2024, SQLite, LevelDB,
+  PostgreSQL): fsync(2) flushes file data and metadata, but "Calling
+  fsync() does not necessarily ensure that the entry in the directory
+  containing the file has also reached disk. For that an explicit fsync()
+  on a file descriptor for the directory is also needed"; POSIX adds
+  "If the fsync() function fails, outstanding I/O operations are not
+  guaranteed to have been completed". write(2): "A successful return
+  from write() does not make any guarantee that data has been committed
+  to disk." Completed-work markers are separate from the data in SQLite
+  (rollback-journal deletion is the commit instant; WAL's "last valid
+  commit record"), LevelDB (CURRENT names the committed MANIFEST) and
+  PostgreSQL (WAL records protected by CRC-32C). Marker creation is
+  atomic via open(2) `O_CREAT|O_EXCL`. Wording rule: no official
+  document approves the recorder's whole finish order — each component
+  (file fsync, directory fsync, separate marker, atomic marker
+  creation, marker validation) carries its own official basis, and
+  "marker mismatch = INVALID" is this design's application of the
+  trust-only-a-valid-commit-marker principle, not a quoted rule. Data
+  written between the 60 s fsyncs can still be lost, and no absolute
+  power-loss guarantee exists.
 - The official `kwcli` (PyPI) requires Python >= 3.13 (this system has 3.12;
   `uv python install 3.13` is the official path) and stores credentials in
   the Secret Service, which needs a D-Bus session bus — a systemd `--user`
