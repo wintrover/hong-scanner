@@ -1,0 +1,30 @@
+#!/bin/sh
+## Fake `kiwoomcli auth refresh --profile <alias>` for the process-pair
+## drill. Same contract as the sidecar test's fake (tools/collector/
+## test_sidecar.py install_fake_kiwoomcli): it rewrites the token cache
+## file like the official client would (kwcli FileTokenStore layout,
+## sidecar.py TokenStore; README §5) and exits 0. It receives no
+## secrets, prints nothing, and the fresh token value is a fixture
+## string, never a credential. Only invoked when the seeded cache reads
+## as expired — the drill seeds a far-future expires_at, so this is a
+## safety net, exercised by the unit suite instead.
+set -eu
+CACHE="${HSDRILL_TOKEN_CACHE:?HSDRILL_TOKEN_CACHE must be set}"
+PROFILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$PROFILE" ] || { echo "usage: kiwoomcli auth refresh --profile <alias>" >&2; exit 2; }
+DIGEST=$(printf '%s' "$PROFILE" | sha256sum | cut -c1-16)
+PATH_FILE="$CACHE/kiwoom/profiles/profile-$DIGEST-token.json"
+mkdir -p "$(dirname "$PATH_FILE")"
+NOW=$(date +%s)
+EXPIRES=$((NOW + 86400))
+printf '{"access_token":"DRILL-FAKE-REFRESHED-TOKEN","token_type":"Bearer","expires_at":%s,"mode":"mock","profile":"%s"}\n' \
+  "$EXPIRES" "$PROFILE" > "$PATH_FILE"
+chmod 600 "$PATH_FILE"
+echo "kiwoomcli($$) auth refresh profile=$PROFILE" >> "${HSDRILL_WIRELOG:-/dev/null}"
+exit 0
