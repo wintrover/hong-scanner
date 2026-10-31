@@ -89,9 +89,13 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
 ### 2.2 `connect` — WS 접속 + LOGIN
 
 - sidecar는 `wss` 접속 → `{"trnm":"LOGIN","token":<access_token>}` 송신 →
-  LOGIN ack 대기. ack `return_code`가 auth 계열({8005,8031,8103} 또는
-  HTTP/WS 401 계열)이면 토큰 재발급 후 **1회** 재시도(공식 SDK와 동일
-  전략). 그래도 실패하면 `conn closed_error` 보고.
+  LOGIN ack 대기. ack `return_code`는 공식 스키마가 String으로, 예제는
+  숫자로 서로 달라, 공식 SDK의 정규화 규칙(`kiwoom/core/errors.py`
+  `normalize_return_code`: 정수 또는 "0"·"0000"·"8005"형 숫자 문자열)을
+  그대로 따른다(정수도 문자열도 아닌 값은 fail-closed). auth
+  계열({8005,8031,8103} 또는 HTTP/WS 401 계열, 또는 return_msg 안
+  `[NNNN:...]`/`CODE=NNNN` 임베드 — SDK `_EMBEDDED_CODE_RE`)이면 토큰
+  재발급 후 **1회** 재시도. 그래도 실패하면 `conn closed_error` 보고.
 - 성공 시 `conn state=open` 이벤트(§3.1). 재접속은 sidecar가 자동 수행한다:
   접속이 끊기면 `closed_*` 보고 후 `ack_timeout_seconds` 간격으로 재접속을
   반복하고, 성공할 때마다 세대를 1 늘려 `conn open`을 보고한다. 재접속 시도는
@@ -363,7 +367,11 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
 
 - REG/REMOVE/LOGIN ack: `{"trnm":"REG","return_code":0,"return_msg":""}` —
   `return_code`는 "등록,해지요청시에만 값 전송 0:정상,1:오류, 데이터 실시간
-  수신시 미전송"(스펙 원문). ack는 어떤 요청 식별자도 되돌려주지 않는다 →
+  수신시 미전송"(스펙 원문). 스키마는 이 필드를 String으로 선언하고 예제는
+  숫자를 보낸다 — 공식 SDK 정규화 규칙(정수 또는 "0"·"0000"형 숫자
+  문자열)대로 두 형식을 하나의 정수로 정규화하고(모의 REST 실측
+  2026-10-31: 정수 0), 그 외 값은 파싱 실패(fail-closed). ack는 어떤
+  요청 식별자도 되돌려주지 않는다 →
   짝짓기는 스트림 순서로 같은 (gen, action)의 가장 오래된 미매칭 req
   (sub_input.activeSets 규칙 그대로)이며, core는 한 번에 하나의 요청만
   미완료로 둔다.
@@ -438,7 +446,9 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
 - ws_raw 실측 형상 대조: 실제 0B/0s/REG ack/PING payload가 §9 형상과
   정확히 일치하는지(필드 집합·타입·FID 존재). 합성 테스트는 스펙 example
   형상 기반일 뿐이다.
-- REG/REMOVE ack의 실측 return_code 집합(0/1 문서 vs 실측), return_msg 원문.
+- REG/REMOVE ack의 실측 return_code 집합(0/1 문서 vs 실측), return_msg 원문
+  (형식 불일치는 2026-10-31 문서 조사로 확인: 스키마 String vs 예제 숫자 —
+  SDK 규칙대로 두 형식 모두 정규화 수용. 실측 집합·원문은 여전히 실측 대상).
 - PING 수신 주기·형태(문자열 "PING" vs {"trnm":"PING"})·무응답 동작.
 - quiet 타이머 10초의 실측 적합성(ack 지연이 10초를 넘는지).
 - 연속조회 페이지 크기·체인 길이(page_cap 10 도달 여부 — 도달 시

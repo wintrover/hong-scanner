@@ -497,6 +497,64 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
                             e.get("state") == "open" for e in evs),
             "conn open after the retry")
 
+    async def test_login_ack_numeric_string_opens(self):
+        h = self.harness(ack_timeout=0.3)
+        h.attach_fake_websockets()
+        await h.start()
+        h.send(type="connect")
+        await h.wait_for(lambda evs: bool(h.fake_ws.sent), "LOGIN sent")
+        # The spec schema types return_code as a String while its examples
+        # send a number; the official SDK normalizes both forms.
+        h.fake_ws.deliver(json.dumps({"trnm": "LOGIN", "return_code": "0"}))
+        await h.wait_for(
+            lambda evs: any(e.get("ev") == "conn" and
+                            e.get("state") == "open" for e in evs),
+            "conn open on the numeric-string ack")
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_login_auth_code_embedded_in_return_msg_retries(self):
+        h = self.harness(ack_timeout=0.3)
+        seed_token_cache(self.cache_dir, token=TOKEN, expires_in=-10.0)
+        install_fake_kiwoomcli(self.bin_dir, self.cache_dir)
+        os.environ["PATH"] = self.bin_dir + os.pathsep + \
+            (self._saved_path or "")
+        h.attach_fake_websockets()
+        await h.start()
+        h.send(type="connect")
+        await h.wait_for(lambda evs: bool(h.fake_ws.sent), "LOGIN sent")
+        # A generic top-level code with the specific one embedded in
+        # return_msg — the pattern the official SDK documents and matches.
+        h.fake_ws.deliver(json.dumps({
+            "trnm": "LOGIN", "return_code": "3",
+            "return_msg": "CODE=8005:Token invalid"}))
+        await h.wait_for(
+            lambda evs: any(e.get("ev") == "token" for e in evs),
+            "the token event after the refresh")
+        await h.wait_for(lambda evs: len(h.fake_ws.sent) >= 2,
+                         "the retried LOGIN")
+        self.assertNotIn(TOKEN, h.fake_ws.sent[1])
+        self.assertIn(FRESH_TOKEN, h.fake_ws.sent[1])
+        h.fake_ws.deliver(json.dumps({"trnm": "LOGIN", "return_code": 0}))
+        await h.wait_for(
+            lambda evs: any(e.get("ev") == "conn" and
+                            e.get("state") == "open" for e in evs),
+            "conn open after the retry")
+
+    async def test_login_ack_non_numeric_code_fails_closed(self):
+        h = self.harness(ack_timeout=0.2)
+        h.attach_fake_websockets()
+        await h.start()
+        h.send(type="connect")
+        await h.wait_for(lambda evs: bool(h.fake_ws.sent), "LOGIN sent")
+        h.fake_ws.deliver(json.dumps({"trnm": "LOGIN", "return_code": "OK"}))
+        await h.wait_for(
+            lambda evs: any(e.get("ev") == "conn" and
+                            e.get("state") == "closed_error" and
+                            "return_code='OK'" in e.get("reason", "")
+                            for e in evs),
+            "a non-numeric code is a closed_error, never a success")
+        self.assertEqual(await h.stop_and_join(), 0)
+
     async def test_login_failure_reports_closed_error(self):
         h = self.harness(ack_timeout=0.2)
         h.attach_fake_websockets()

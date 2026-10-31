@@ -238,10 +238,24 @@ block acks:
   tickRaises("ackReturnCode: a missing return_code fails (spec sends it)",
              "has no return_code", proc () =
                discard ackReturnCode(0, bytesOf("{\"trnm\":\"REG\"}")))
-  tickRaises("ackReturnCode: a string return_code fails",
-             "is not an integer", proc () =
+  check("ackReturnCode: a numeric string canonicalizes (the schema's type)",
+        ackReturnCode(0, bytesOf(
+          "{\"trnm\":\"REG\",\"return_code\":\"0\"}")) == 0)
+  check("ackReturnCode: a padded numeric string canonicalizes (SDK rule)",
+        ackReturnCode(0, bytesOf(
+          "{\"trnm\":\"REG\",\"return_code\":\"0001\"}")) == 1)
+  tickRaises("ackReturnCode: a non-numeric string fails",
+             "is not an integer literal", proc () =
                discard ackReturnCode(0, bytesOf(
-                 "{\"trnm\":\"REG\",\"return_code\":\"0\"}")))
+                 "{\"trnm\":\"REG\",\"return_code\":\"OK\"}")))
+  tickRaises("ackReturnCode: an empty string code fails",
+             "is not an integer literal", proc () =
+               discard ackReturnCode(0, bytesOf(
+                 "{\"trnm\":\"REG\",\"return_code\":\"\"}")))
+  tickRaises("ackReturnCode: a bool is neither documented form",
+             "neither an integer nor a numeric", proc () =
+               discard ackReturnCode(0, bytesOf(
+                 "{\"trnm\":\"REG\",\"return_code\":true}")))
 
 if failures == 0:
   echo "TICKWIRE CONTRACT PASSED (", passes, " checks)"

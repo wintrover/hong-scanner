@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -48,10 +49,37 @@ REST_PATH = "/api/dostk/rkinfo"
 TOKEN_BUFFER_SECONDS = 600
 # The auth-class LOGIN ack codes (README §2.2): one refresh + one retry.
 LOGIN_RETRY_CODES = {8005, 8031, 8103}
+# The official SDK's embedded-code rule (kiwoom/core/errors.py): Kiwoom
+# often reports a generic top-level return_code and puts the specific code
+# inside return_msg as "[8005:...]" (REST) or "CODE=8005" (WebSocket). The
+# auth-class codes are matched in both places.
+EMBEDDED_CODE_RE = re.compile(r"\[(\d{3,5}):|CODE=(\d{3,5})")
 SORT_TP = {"up": "1", "down": "3"}
 REST_PARAMS_FIELDS = [
     "mrkt_tp", "trde_qty_cnd", "stk_cnd", "crd_cnd", "updown_incls",
     "pric_cnd", "trde_prica_cnd", "stex_tp"]
+
+
+def normalize_return_code(value):
+    """The official SDK's rule (kiwoom/core/errors.py): the server emits
+    return_code as an int or a numeric string ("0", "0000", "8005")
+    depending on the endpoint. None/bool/blank/non-numeric mean no code."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text or not text.lstrip("-").isdigit():
+        return None
+    return int(text)
+
+
+def embedded_return_code(return_msg):
+    """The specific code embedded in a Kiwoom return_msg, if any."""
+    match = EMBEDDED_CODE_RE.search(str(return_msg or ""))
+    if match is None:
+        return None
+    return int(match.group(1) or match.group(2))
 
 
 class SidecarExit(Exception):
@@ -311,10 +339,24 @@ class Sidecar:
                        doc.get("trnm") != "LOGIN" or \
                        "return_code" not in doc:
                         continue
-                    code = doc.get("return_code")
+                    code = normalize_return_code(doc.get("return_code"))
+                    if code is None:
+                        # Present, but in no form the official sources
+                        # document (int or canonical numeric string, the
+                        # SDK's normalize_return_code rule): fail-closed,
+                        # never a silent success.
+                        self.emit({
+                            "ev": "conn", "state": "closed_error",
+                            "conn": self.conn_gen + 1, "code": 1000,
+                            "reason": "login failed return_code=%r" %
+                                      (doc.get("return_code"),)})
+                        return False
                     if code == 0:
                         return True
-                    if code in LOGIN_RETRY_CODES and attempt == 0:
+                    if attempt == 0 and (code in LOGIN_RETRY_CODES or
+                                         embedded_return_code(
+                                             doc.get("return_msg"))
+                                         in LOGIN_RETRY_CODES):
                         try:
                             self.acquire_token(force=True)
                             self.emit({"ev": "token"})
