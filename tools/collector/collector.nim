@@ -90,7 +90,14 @@ proc pollFd(fd: cint; timeoutMs: int): bool =
   pfd.fd = fd
   pfd.events = POLLIN
   let n = posix.poll(addr pfd, 1, cint(timeoutMs))
-  result = n > 0 and (pfd.revents and POLLIN) != 0
+  # POLLHUP (the last writer closed the pipe) and POLLERR are ready too:
+  # a pipe at end-of-file may report POLLHUP without POLLIN (measured on
+  # kernel 6.17: events=16), and read() then answers the EOF. Treating it
+  # as a timeout made readLine return rrTimeout forever — the collector
+  # spun instead of going honestly INCOMPLETE when the sidecar died
+  # mid-session (found by the process-pair drill).
+  result = n > 0 and
+    (pfd.revents and (POLLIN or POLLHUP or POLLERR)) != 0
 
 proc readLine(r: var PipeReader; timeoutMs: int): (ReadResult, string) =
   ## One LF-terminated line, a timeout (for the syncNow heartbeat), or EOF.
@@ -99,7 +106,13 @@ proc readLine(r: var PipeReader; timeoutMs: int): (ReadResult, string) =
   while true:
     let nl = find(r.acc, '\n')
     if nl >= 0:
-      return (rrLine, r.acc[0 ..< nl])
+      result = (rrLine, r.acc[0 ..< nl])
+      # Consume the returned line: without this the next call would find
+      # the same newline again and re-deliver the first line forever
+      # (found by the process-pair drill; a session could never get past
+      # its first event).
+      r.acc = r.acc[nl + 1 ..< r.acc.len]
+      return
     if r.eof:
       if r.acc.len == 0:
         return (rrEof, "")

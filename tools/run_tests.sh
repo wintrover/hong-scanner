@@ -34,6 +34,7 @@ run nim c -r --hints:off --warnings:off --path:src tests/test_tickwire_contract.
 run nim c -r --hints:off --warnings:off --path:src tests/test_subcheck_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_stream_contract.nim
+run bash tests/test_collector_pipe_contract.sh
 run bash tools/collector/test_sidecar.sh
 run bash tests/test_cli_contract.sh
 run bash tests/test_build_contract.sh
