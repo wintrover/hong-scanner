@@ -15,9 +15,15 @@
 ##       "values":{"215":"b","20":"170000","214":"000000"}}]}
 ##   REG/REMOVE/LOGIN ack: {"trnm":"REG","return_code":0,"return_msg":""}
 ##     — return_code: "등록,해지요청시에만 값 전송 0:정상,1:오류, 데이터
-##     실시간 수신시 미전송" (spec 원문). An ack carries no request
-##     identifier: pairing is by stream order per (gen, action), the
-##     sub_input.activeSets rule.
+##     실시간 수신시 미전송" (spec 원문). The spec schema types the field
+##     as a String while its own examples send a JSON number, and the
+##     official SDK normalizes both ("The server emits the code as an int
+##     or a numeric string ('0', '0000', '8005') depending on the
+##     endpoint" — kiwoom/core/errors.py, normalize_return_code); the
+##     mock REST endpoint measured 2026-10-31 sent an integer. Both
+##     canonical forms are accepted here and normalized to one integer
+##     (ackReturnCode). An ack carries no request identifier: pairing is
+##     by stream order per (gen, action), the sub_input.activeSets rule.
 ##
 ## FID interpretation boundary (fail-closed):
 ##   - 20 체결시간 HHmmss (spec 원문) — combined with the session date.
@@ -334,10 +340,32 @@ proc ackTrnmOf*(seqNo: int; payload: seq[byte]): string =
     raise terr(seqNo, "ack payload trnm is not REG|REMOVE")
   trnm.get.strVal
 
+proc canonicalAckCode(seqNo: int; text: string): int =
+  ## The numeric-string form of return_code, per the official rule: the
+  ## spec schema types the field as a String while its examples send a
+  ## number, and the official SDK normalizes both ("The server emits the
+  ## code as an int or a numeric string ('0', '0000', '8005') depending on
+  ## the endpoint" — kiwoom/core/errors.py, normalize_return_code). A
+  ## canonical integer literal (optional '-', digits, surrounding spaces
+  ## stripped) is accepted and canonicalized; every other string raises.
+  let s = text.strip()
+  var body = s
+  if body.len > 0 and body[0] == '-':
+    body = body[1..^1]
+  if body.len == 0 or not body.allCharsInSet(Digits):
+    raise terr(seqNo, "ack return_code string is not an integer literal: " &
+                            text)
+  parseInt(s)
+
 proc ackReturnCode*(seqNo: int; payload: seq[byte]): int =
-  ## The ack's return_code. A missing or non-integer code is a parse
-  ## failure: the spec documents the code as always sent for REG/REMOVE
-  ## responses ("등록,해지요청시에만 값 전송"), so absence is fail-closed.
+  ## The ack's return_code. A missing code is a parse failure: the spec
+  ## documents the code as always sent for REG/REMOVE responses ("등록,해지
+  ## 요청시에만 값 전송"), so absence is fail-closed. The value is accepted
+  ## in both forms the official sources use — a JSON number (the spec's
+  ## examples; the integer the mock REST endpoint measured 2026-10-31 sent)
+  ## or a canonical numeric string (the spec schema's declared type, the
+  ## form the official SDK also normalizes) — and canonicalized to the one
+  ## integer the sub records store. Anything else is a parse failure.
   let text = bytesText(payload)
   var doc: HcjValue
   try:
@@ -349,6 +377,11 @@ proc ackReturnCode*(seqNo: int; payload: seq[byte]): int =
     raise terr(seqNo,
       "ack payload has no return_code (the spec sends it for every " &
       "REG/REMOVE response; absence is fail-closed)")
-  if rc.get.kind != hkInt:
-    raise terr(seqNo, "ack return_code is not an integer: " & kindName(rc.get))
-  int(rc.get.ival)
+  case rc.get.kind
+  of hkInt:
+    result = int(rc.get.ival)
+  of hkStr:
+    result = canonicalAckCode(seqNo, rc.get.strVal)
+  else:
+    raise terr(seqNo, "ack return_code is neither an integer nor a numeric " &
+      "string: " & kindName(rc.get))
