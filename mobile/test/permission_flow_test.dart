@@ -171,4 +171,20 @@ void main() {
     expect(find.text('다시 요청'), findsOneWidget);
     expect(find.textContaining('요청 이력: 1회'), findsOneWidget);
   });
+
+  testWidgets('the delivered FID renders in full — copyable, not truncated',
+      (WidgetTester tester) async {
+    // FID-scale length (~150 chars): a 60-char prefix would visibly cut it.
+    final fid = 'fcm-${'a1B2c3D4' * 18}x';
+    final push = FakeTokenPushService(
+        ready: true, decision: PushPermissionDecision.granted, fid: fid);
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+    await tester.pumpWidget(HongScannerApp(store: store));
+
+    expect(find.textContaining(fid), findsOneWidget,
+        reason: 'the operator registers exactly the displayed identifier — '
+            'a truncated prefix would be a broken registration');
+  });
 }

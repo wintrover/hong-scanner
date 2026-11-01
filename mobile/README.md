@@ -117,10 +117,17 @@ project arrives:
 
 1. **google-services.json** — place it at
    `android/app/google-services.json` (Firebase console, package
-   `com.hongscanner.hongscanner`). Never commit it.
-2. **Gradle plugin** — declare `com.google.gms.google-services` in
-   `android/settings.gradle.kts` and apply it in
-   `android/app/build.gradle.kts`.
+   `com.hongscanner.hongscanner`). Never commit it — the path is
+   gitignored (`android/.gitignore`).
+2. **Gradle plugin** — `flutterfire configure` (step 3) inserts the
+   google-services Gradle plugin automatically and idempotently, inside
+   the `START/END: FlutterFire Configuration` markers:
+   `id("com.google.gms.google-services") version("…") apply false` in
+   `android/settings.gradle.kts` and the plugin id in
+   `android/app/build.gradle.kts`. Declare it manually only if the CLI
+   patch fails — and then with `version("…") apply false`. A build that
+   refuses to run because the plugin is applied before the JSON exists
+   is intended fail-closed behavior, not a bug.
 3. **firebase_options.dart** — run `flutterfire configure`, then call
    `Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)`
    before any FCM usage.
@@ -130,10 +137,14 @@ project arrives:
 5. **Token registration** — the app has NO write path to the server.
    `FcmPushService` registers the app instance (`register()`) and the
    Overview push card displays the delivered Firebase Installation ID
-   (`onRegistered`) as selectable text; the operator registers it with
-   the server-side `tools/notify/register` CLI (bearer-authenticated,
-   tokens stored outside the repo). The card also shows the ask history
-   so the operator can see why push is active or disabled.
+   (`onRegistered`) in full, selectable for copying — no truncation.
+   The operator registers it with the server-side
+   `tools/notify/notify_register.py` CLI via `--token-file` (or stdin):
+   bearer-authenticated, the token value never touches argv or logs and
+   is stored outside the repo. The identifier the card shows — the FID
+   after the token-API migration — is exactly what gets registered.
+   The card also shows the ask history so the operator can see why push
+   is active or disabled.
 6. **Token API migration** — DONE (code-only; no Firebase project
    needed). firebase_messaging 17.x deprecates `getToken()` /
    `onTokenRefresh` in favor of the FID registration APIs added in
@@ -146,11 +157,30 @@ project arrives:
    `FcmPushService` now exposes `register()`/`onRegistered` through the
    `PushTokenSource` capability interface in `lib/services/push_service.dart`
    (same fail-closed guards: unwired access throws `StateError`); the
-   deprecated calls and their suppressed lint are gone. The app only
-   displays the delivered FID — server registration stays the operator's
-   CLI step. Real delivery is still proven on a device at step 7.
+   deprecated calls and their suppressed lint are gone.
+   Android opt-in: FID registration requires
+   `<meta-data android:name="firebase_messaging_installation_id_enabled"
+   android:value="true"/>` inside `<application>` in
+   `android/app/src/main/AndroidManifest.xml` (added; without it
+   `register()` throws `IllegalStateException` and no FID events are
+   delivered —
+   `https://firebase.google.com/docs/cloud-messaging/android/get-started`).
+   Server contract: the FCM HTTP v1 `Message.token` field accepts a FID
+   during the transition period, but the field is deprecated in favor
+   of the `fid` field
+   (`https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages`);
+   `tools/notify/notify_fcm.py` currently sends `message.token` — that
+   still reaches FID targets, and migrating the sender to `fid` is a
+   separate server-side task. Handoff-time verification: register the
+   displayed FID, dispatch a test message to it, and observe delivery
+   plus tap routing (step 7).
 7. **Real-device receipt drill** — dispatch a synthetic event, observe
    notification tap → Event Detail on a physical device (or via adb).
+   Prerequisites: the device has Google Play services (GMS), the
+   notification permission is granted (Android 13+ runtime prompt), and
+   Play Protect may warn on a sideload install (allow manually).
+   Official guide:
+   `https://firebase.google.com/docs/cloud-messaging/android/client`.
    This is a GATES-evidence item, not a CI check.
 
 ## Release signing (fail-closed)
