@@ -275,21 +275,16 @@ class FakePushService implements PushService {
   FakePushService({
     this.ready = false,
     this.decision,
-    this.token,
     this.throwOnAsk = false,
   });
 
   final bool ready;
   PushPermissionDecision? decision;
-  final String? token;
   final bool throwOnAsk;
   int askCount = 0;
 
   @override
   bool get isReady => ready;
-
-  @override
-  Future<String?> getToken() async => token;
 
   @override
   Future<PushPermissionDecision?> requestPermission() async {
@@ -299,6 +294,38 @@ class FakePushService implements PushService {
   }
 }
 
+/// PushTokenSource fake mirroring the firebase_messaging 17.x
+/// register()/onRegistered surface: register() emits the scripted FID on
+/// the broadcast stream (as the plugin delivers the Firebase Installation
+/// ID after registration), and a scripted registerError stands in for a
+/// failed registration call.
+class FakeTokenPushService extends FakePushService
+    implements PushTokenSource {
+  FakeTokenPushService({
+    super.ready = true,
+    super.decision = PushPermissionDecision.granted,
+    this.fid,
+    this.registerError,
+  });
+
+  final String? fid;
+  final Object? registerError;
+  int registerCount = 0;
+  final registeredController = StreamController<String>.broadcast();
+
+  @override
+  Future<void> register() async {
+    registerCount += 1;
+    final error = registerError;
+    if (error != null) throw error;
+    final value = fid;
+    if (value != null) registeredController.add(value);
+  }
+
+  @override
+  Stream<String> get onRegistered => registeredController.stream;
+}
+
 /// PushMessageSource fake: stub streams driven by tests, mirroring the
 /// firebase_messaging surface (initial/tap/foreground/deleted).
 class FakeMessagePushService extends FakePushService
@@ -306,7 +333,6 @@ class FakeMessagePushService extends FakePushService
   FakeMessagePushService({
     super.ready = true,
     super.decision = PushPermissionDecision.granted,
-    super.token,
     this.initial,
   });
 

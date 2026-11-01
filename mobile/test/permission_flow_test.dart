@@ -16,24 +16,55 @@ void main() {
   test('first run with granted decision: asked once, recorded, phase granted',
       () async {
     final kv = MemoryKeyValueStore();
-    final push = FakePushService(
+    final push = FakeTokenPushService(
         ready: true,
         decision: PushPermissionDecision.granted,
-        token: 'fcm-token-abc');
+        fid: 'fcm-fid-abc');
     final store = makeStore(
         transport: fixtureTransport(), push: push, kv: kv);
     await store.bootstrap();
 
     expect(push.askCount, 1, reason: 'first run auto-asks exactly once');
+    expect(push.registerCount, 1,
+        reason: 'a ready token source registers exactly once per bootstrap');
     expect(store.pushState.phase, PushPhase.granted);
     expect(store.pushState.askedCount, 1);
     expect(store.pushState.lastResponse, PushPermissionDecision.granted);
-    expect(store.pushState.token, 'fcm-token-abc');
+    expect(store.pushState.token, 'fcm-fid-abc',
+        reason: 'the FID delivered via onRegistered is display-only');
 
     final record = await PushPermissionLedger(store: kv).load();
     expect(record.askedCount, 1);
     expect(record.lastResponse, PushPermissionDecision.granted);
     expect(record.lastAskedAt, DateTime(2026, 11, 2, 9));
+  });
+
+  test('register() failure surfaces an honest error, not a fake token',
+      () async {
+    final push = FakeTokenPushService(
+        ready: true,
+        registerError: StateError('registration failed at the plugin'));
+    final store = makeStore(
+        transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(push.registerCount, 1);
+    expect(store.pushState.token, isNull);
+    expect(store.pushState.tokenError, contains('토큰 획득 실패'));
+    expect(store.pushState.tokenError, contains('registration failed'));
+  });
+
+  test('ready service without a token source shows no token and no error',
+      () async {
+    final push = FakePushService(
+        ready: true, decision: PushPermissionDecision.granted);
+    final store = makeStore(
+        transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(store.pushState.token, isNull);
+    expect(store.pushState.tokenError, isNull,
+        reason: 'nothing was delivered and nothing failed — no invented state');
   });
 
   test('denied decision: app keeps working, push shown disabled', () async {

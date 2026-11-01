@@ -128,15 +128,27 @@ project arrives:
    `defaultAppStore()` in `lib/main.dart` with `const FcmPushService()`.
    It still fails closed (throws `StateError`) until step 3 succeeds.
 5. **Token registration** — the app has NO write path to the server.
-   `FcmPushService` obtains the token and the Overview push card
-   displays it (selectable text); the operator registers it with the
-   server-side `tools/notify/register` CLI (bearer-authenticated,
+   `FcmPushService` registers the app instance (`register()`) and the
+   Overview push card displays the delivered Firebase Installation ID
+   (`onRegistered`) as selectable text; the operator registers it with
+   the server-side `tools/notify/register` CLI (bearer-authenticated,
    tokens stored outside the repo). The card also shows the ask history
    so the operator can see why push is active or disabled.
-6. **Token API migration** — firebase_messaging 17.x deprecates
-   `getToken()`/`onTokenRefresh` in favor of `register()`/`onRegistered`;
-   `FcmPushService.getToken()` keeps the deprecated call (scaffold
-   contract, suppressed lint) — migrate at handoff.
+6. **Token API migration** — DONE (code-only; no Firebase project
+   needed). firebase_messaging 17.x deprecates `getToken()` /
+   `onTokenRefresh` in favor of the FID registration APIs added in
+   17.0.0 (flutterfire #18482): `register()` (`Future<void>`, initiates
+   registration), `onRegistered` (`Stream<String>` of Firebase
+   Installation IDs — the direct-send target), plus
+   `unregister()`/`onUnregistered`. Verified against the pinned
+   firebase_messaging 17.0.1 sources (`lib/src/messaging.dart`,
+   `@Deprecated('Use register() and onRegistered instead.')`).
+   `FcmPushService` now exposes `register()`/`onRegistered` through the
+   `PushTokenSource` capability interface in `lib/services/push_service.dart`
+   (same fail-closed guards: unwired access throws `StateError`); the
+   deprecated calls and their suppressed lint are gone. The app only
+   displays the delivered FID — server registration stays the operator's
+   CLI step. Real delivery is still proven on a device at step 7.
 7. **Real-device receipt drill** — dispatch a synthetic event, observe
    notification tap → Event Detail on a physical device (or via adb).
    This is a GATES-evidence item, not a CI check.
