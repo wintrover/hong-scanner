@@ -144,16 +144,23 @@ Two independent state machines share the same closed bars. There is no
 |---|---|---|
 | `input.hcj.jsonl` | yes | yes |
 | `bars.hcj.jsonl` | yes | yes |
+| `events.hcj.jsonl` | yes | yes |
 | `signals.hcj.jsonl` | yes | yes |
 | `run.json` | no | no |
 | `CHECKSUMS.sha256` | yes | — |
 
-`CHECKSUMS.sha256` has exactly three lines, sorted by file name:
+`CHECKSUMS.sha256` has exactly four lines, sorted by file name:
 `<sha256hex>  <name>`, where the hash is over the file bytes.
 
 `bars.hcj.jsonl` fields: `bar_index, bar_position, close, close_boundary,
 closed, degraded, empty, gap_edge, high, low, open, out_of_order,
 session_class, symbol, ticks, vol, vol_partial`.
+
+`events.hcj.jsonl` fields: `data_quality, event_id, event_type, evidence_ref,
+observed_at, rule_id, rule_version, session_id, severity` — plus `direction`
+and `rank` on candidate-transition facts (EXITED carries no rank) and
+`symbol` on symbol-scoped facts. Closed facts: no record position, no
+verification or delivery state. See §13.
 
 `signals.hcj.jsonl` fields: `bar_index, price, reason, session_date, signal,
 symbol`.
@@ -385,15 +392,18 @@ precedent and no official prohibition).
 
 ## 13. Events (VS-3 contract)
 
-Everything in this section is **target contract** (like §12): no live event
-producer, push transport or mobile client exists yet, and passing VS-2
-proves none of it. The record schemas are the single source of truth:
-`contracts/events/event.schema.json` (the immutable event fact) and
-`contracts/events/delivery.schema.json` (the operational delivery record).
-The event contract suite (`tests/test_event_contract.nim`) covers the
-schemas' structure, vocabularies, the committed fixture, the deterministic
-id rule and the state separation; passing it does not prove an event
-producer exists.
+The judgment layer described in this section is implemented
+(`src/hs/event_gen.nim`; §13.8 states exactly what exists and what does
+not). The push transport, mobile client and delivery path are not
+implemented, and nothing in this repository proves operational approval —
+GATES P12 remains the only such authority. The record schemas are the
+single source of truth: `contracts/events/event.schema.json` (the immutable
+event fact) and `contracts/events/delivery.schema.json` (the operational
+delivery record). The event contract suite (`tests/test_event_contract.nim`)
+covers the schemas' structure, vocabularies, the committed fixture, the
+deterministic id rule and the state separation; the judgment suite
+(`tests/test_event_gen_contract.nim`) covers the implemented judgment
+layer. Passing either proves no live producer and no delivery path exists.
 
 ### 13.1 One judgment function
 
@@ -478,3 +488,56 @@ The six VS-3 design principles govern this contract and are referenced,
 not duplicated: facts live on the server; one judgment logic;
 notifications are transport; mobile is read-only; uncertainty is not
 hidden; existing platform features are leveraged.
+
+### 13.8 Implementation note (what exists, what does not)
+
+Implemented — one judgment function, two drivers, one byte comparison:
+
+- `step(state, record) -> (state', events)` and the end-of-stream judgment
+  `finish(state)` live in `src/hs/event_gen.nim`. The replay path folds
+  `eventsOfRecords` once over the consumed stream (`src/hs/replay.nim`);
+  the live collector (`tools/collector/collector.nim`) appends the same
+  `step` judgments per consumed record. There is no other judgment code.
+- The live journal is `<out>/events.hcj.jsonl`, created exclusively
+  (`O_CREAT|O_EXCL|O_NOFOLLOW`): an existing judgment log is never
+  reopened or appended to. Events are appended at consume time (§13.2)
+  and the seal's session_end record is judged through the same `step`.
+- Replay writes `events.hcj.jsonl` as the fourth checksummed artifact
+  (§7). `verify` byte-compares the run directory's file against the
+  recomputation — a missing or differing file is a named MISMATCH issue,
+  never a pass — and prints the recomputation hash as `EVENTS=<sha256>`
+  on every verdict past the run-status gate. A drill carries the live
+  bytes into the run directory byte-exact (the same staging the commit
+  marker gets) so verify audits the artifact the collector wrote.
+- Death/restart recovery is record-first reconstruction: the state is
+  `stateAt(records consumed so far)`, and resuming the recorded stream
+  from there reproduces exactly the missing events (covered by the
+  judgment suite's recovery block).
+
+Rules (all `rule_version: 1`; `evidence_ref` is the declared vendor scope
+for candidate transitions, otherwise the content address of the consumed
+record's canonical line):
+
+| rule_id | event_type(s) | judged from | severity / data_quality |
+|---|---|---|---|
+| `candidate-transition-v1` | CANDIDATE_ENTERED / UPDATED / EXITED | completed ka10027 up+down chains (`evidence_ref` = `ka10027:stex_tp=1:sort_tp=1` or `…:sort_tp=3`); a code in both directions is judged once, up first; EXITED carries no rank | INFO / OBSERVING |
+| `feed-disconnected-v1` | FEED_DISCONNECTED | ws_conn `closed_ok` (INFO) / `closed_error` (HIGH); `open` judges nothing | INFO or HIGH / INCOMPLETE |
+| `gap-suspected-v1` | DATA_GAP_SUSPECTED | every gap record | HIGH / INCOMPLETE |
+| `rest-truncated-v1` | REST_TRUNCATED | a gap record whose `what` is `rest_truncated` (second fact of the same record, distinct by event_type) | HIGH / INCOMPLETE |
+| `market-state-unknown-v1` | MARKET_STATE_UNKNOWN | a 0s ws_raw payload whose FID 215 value is outside the evidenced set {2,4,8,9}; at most one per record | HIGH / UNKNOWN |
+| `session-close-v1` | SESSION_ENDED | the session_end seal record | INFO / OBSERVING |
+| `session-incomplete-v1` | SESSION_INCOMPLETE | `finish` on a consumed stream that never sealed; binds to the last consumed record | HIGH / INCOMPLETE |
+
+Not implemented — vocabulary only (the schema defines the full
+vocabulary; the implementation lags it):
+
+- `REPLAY_MATCH`, `REPLAY_MISMATCH`, `SESSION_APPROVED` are session-level
+  verify outputs, not `step` facts; the judgment layer emits none of them.
+- Delivery records (`contracts/events/delivery.schema.json`), the push
+  transport and the mobile client: none exist.
+
+What the current evidence does not prove: byte-identity proven on
+synthetic fixtures and a dev-build drill is mechanism, not operation — no
+live market data, no real vendor stream, no delivery path, no GATES P12
+observation. Any `NO_TRIGGER_OBSERVED`-style claim remains impossible
+until a real observed stream exists.

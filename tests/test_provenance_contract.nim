@@ -658,7 +658,7 @@ when defined(posix):
     check("run.json was never written through the symlink",
           symlinkExists(outDir / runFile))
     check("refusal left only the artifacts created before the clash",
-          countEntries(outDir) == 4)
+          countEntries(outDir) == 5)
     let tv = tryVerify(outDir, infoVariant())
     check("the partial run left by the refusal is MISMATCH exit 6",
           (not tv.crashed) and tv.r.verdict == vMismatch and
@@ -703,7 +703,7 @@ when defined(posix):
     for kind, path in walkDir(outDir):
       if kind == pcFile:
         inc files
-    check("the winner left exactly the five run artifacts", files == 5)
+    check("the winner left exactly the six run artifacts", files == 6)
     let tv = tryVerify(outDir, infoVariant())
     check("the winning run verifies MATCH (no interleaving)",
           (not tv.crashed) and tv.r.matched)
