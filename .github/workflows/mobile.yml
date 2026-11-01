@@ -1,0 +1,60 @@
+name: mobile
+
+# Mobile suite for the Flutter Android app (mobile/).
+#
+# NOT a required check — this workflow never becomes a merge authority.
+# The ruleset's required `ci` check + the `ALL CONTRACT SUITES PASSED`
+# gate marker (tools/run_tests.sh) stay the only merge proof (AGENTS.md
+# §2.1). A green run here is measured evidence the main agent reads from
+# the run log before merging a mobile PR; a missing check is UNKNOWN,
+# never SUCCESS.
+#
+# Release builds are not signed in CI: there is no keystore here, and the
+# app's Gradle config refuses a release build without one (fail-closed).
+# CI therefore builds the debug APK only.
+
+on:
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile.yml'
+  push:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile.yml'
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # JDK 21 matches the documented local toolchain (openjdk-21).
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The Flutter/Dart version is pinned to the local toolchain
+      # (mobile/README.md §requirements): 3.47.9 / Dart 3.13.7.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: false
+      - name: Resolve packages
+        run: flutter pub get
+        working-directory: mobile
+      - name: Analyze
+        run: flutter analyze
+        working-directory: mobile
+      - name: Test
+        run: flutter test
+        working-directory: mobile
+      - name: Build debug APK (unsigned release is refused by design)
+        run: flutter build apk --debug
+        working-directory: mobile
+      - name: Suite marker
+        run: echo "MOBILE SUITE PASSED"

@@ -1,49 +1,197 @@
 # hongscanner (mobile)
 
-Flutter scaffold for the Hong Scanner mobile app. This is the base for the
-full app; all screens are static placeholders — no real market data is
-included (repo rule: 실시장 데이터는 저장소에 들어오지 않는다).
+Flutter Android app for Hong Scanner (VS-3, PR-7): a **read-only
+projection of recorded facts** served by the local API
+(`tools/api/README.md` is the contract). The app judges nothing, caches
+no authority, and has no write path — it renders what the API records
+and honestly says "기록 없음 / 오프라인" when there is nothing recorded
+or no connection. No real market data enters the app or the repository
+(repo rule).
 
 ## Layout
 
 - `lib/main.dart` — app root, bottom-navigation shell (4 tabs),
-  `defaultPushService()` composition point
-- `lib/screens/` — Overview, Timeline, Event Detail, Evidence (placeholders)
-- `lib/services/push_service.dart` — `PushService` abstraction
-- `lib/services/noop_push_service.dart` — `NoopPushService` (default wiring)
-- `lib/services/fcm_push_service.dart` — `FcmPushService` skeleton (fail-closed)
+  `defaultAppStore()` / `defaultPushService()` composition points
+- `lib/screens/` — Overview · Timeline · Event Detail · Evidence
+  (all data-driven), plus `app_scope.dart` (InheritedNotifier) and
+  shared honest-state widgets in `widgets.dart`
+- `lib/state/app_store.dart` — the single `ChangeNotifier` store:
+  API sections with per-section load state, event selection/routing,
+  push permission flow, bounded-backoff resync
+- `lib/api/api_client.dart` · `lib/api/api_models.dart` — typed GET-only
+  client matching `tools/api/README.md` (identifier validation mirrors
+  the server's; `null` = "no record" is preserved, never coerced to 0)
+- `lib/services/push_service.dart` — `PushService` +
+  `PushMessageSource` abstractions, `PushMessage` payload type
+- `lib/services/noop_push_service.dart` — `NoopPushService` (default;
+  reports not-ready, answers null "nothing was asked")
+- `lib/services/fcm_push_service.dart` — `FcmPushService`
+  (fail-closed until Firebase is initialized)
+- `lib/services/push_permission.dart` — persisted ask history
+  (KeyValueStore over `shared_preferences`) for the Android 13+
+  denied-ambiguity problem
 
 ## Requirements
 
-- Dart ^3.6.0 / Flutter ≥ 3.27 (required by firebase_messaging 17.x)
+- Dart ^3.6.0 / Flutter ≥ 3.27 — pinned local toolchain: Flutter
+  3.47.9 stable / Dart 3.13.7 (`~/sdk/flutter`)
 - Android `minSdk 24` — set in `android/app/build.gradle.kts`
-- Dependencies: `firebase_core`, `firebase_messaging: ^17.0.1`
+- Dependencies: `firebase_core`, `firebase_messaging: ^17.0.1`,
+  `shared_preferences` (ask-history persistence only)
 
-## Not wired yet — Firebase handoff checklist
+## Running against the local API
 
-No Firebase project exists yet. When it arrives, do exactly this:
+The API binds **127.0.0.1 only** — remote exposure is out of scope by
+contract (`tools/api/README.md` §7). Start it, then point the app at it:
 
-1. **google-services.json** — place it at `android/app/google-services.json`
-   (download from the Firebase console, package name
-   `com.hongscanner.hongscanner`).
+```sh
+python3.13 tools/api/serve.py --runs /abs/runs --ledger /abs/ledger.hcj.jsonl --port 8080
+flutter run --dart-define=HS_API_BASE=http://10.0.2.2:8080   # Android emulator
+```
+
+- `10.0.2.2` is the emulator's host-loopback alias — no extra setup.
+  This is the `HS_API_BASE` default.
+- Physical device over USB: `adb reverse tcp:8080 tcp:8080`, then
+  `--dart-define=HS_API_BASE=http://127.0.0.1:8080`.
+- Anything beyond that (remote exposure, TLS, WireGuard fronting) is
+  explicitly not built — a separate plan would be required first.
+
+## Screens — recorded facts only
+
+- **Overview** — latest session/run facts, ledger summary, delivery
+  summary, verification facts, and the latest session's UP/DOWN
+  candidates (facts carry `direction`; the app only groups what was
+  recorded). Market prices are not served by the API and are not shown.
+- **Timeline** — events in ledger append order (the API never reorders;
+  the label says so). Rows show recorded fields and per-event delivery
+  records kept strictly separate from the facts.
+- **Event Detail** — the selected fact verbatim (canonical field order),
+  its `evidence_ref` (근거) highlighted, and its delivery records.
+- **Evidence** — per-session verification facts: committed marker,
+  `session_end`, CHECKSUMS rows (recorded vs recomputed hash, unsafe
+  artifact names shown as refused), `events.hcj.jsonl` sha256, and the
+  operator-recorded `VERDICT` line quoted verbatim — or "기록 안 됨".
+  This screen is a fact list, not an approval; approval authority stays
+  GATES P12 server-side.
+
+Loading (skeleton), "기록 없음", and offline/error states are rendered
+as distinct UI states — the app never renders absence as success.
+
+## Resync policy
+
+Fetch of `/status`, `/events`, `/candidates`, `/sessions`, and the
+latest session's `/sessions/{session}/verification` runs on startup and
+on foreground resume, with a restrained backoff (1s, 2s, capped by 3
+attempts) that ends in visible error states — never an infinite spinner.
+This is also the recovery path for missed messages: firebase_messaging
+17.x removed the `onDeletedMessages` Dart callback upstream, so FCM
+queue-discard recovery is guaranteed by the resume resync instead of a
+callback (documented delta, not a hidden behavior).
+
+## Push flow (notification+data only)
+
+The dispatcher (tools/notify) sends **notification+data** messages with
+data `{event_id, event_type, severity}`. Data-only payloads plus local
+notification re-synthesis are forbidden by design.
+
+- **Permission**: one automatic ask on the first run; the ask count,
+  timestamp and decision are persisted (Android 13+ cannot distinguish
+  "denied" from "asked before", so the app's own recorded history is the
+  only fact). Denied keeps the app fully functional and shows 푸시
+  비활성 with an explicit "다시 요청" button — no silent re-nagging.
+- **Foreground**: the OS does not display notification messages while
+  the app is foregrounded; the app shows an in-app banner (chosen,
+  documented policy).
+- **Background tap** → `onMessageOpenedApp` → data `event_id` → Event
+  Detail tab with a `/events/{id}` fetch. **Cold start** →
+  `getInitialMessage()`, same routing. Payloads without a usable
+  `event_id` are not routed (nothing is invented).
+- **Terminated state display** is the OS notification itself — the
+  official path.
+
+### Firebase handoff checklist (updated for PR-7)
+
+No Firebase project exists yet — the app ships with
+`NoopPushService`, so `FcmPushService` stays fail-closed. When the
+project arrives:
+
+1. **google-services.json** — place it at
+   `android/app/google-services.json` (Firebase console, package
+   `com.hongscanner.hongscanner`). Never commit it.
 2. **Gradle plugin** — declare `com.google.gms.google-services` in
-   `android/settings.gradle.kts` and apply it in `android/app/build.gradle.kts`.
-   Until then the build succeeds but the app has no Firebase config.
-3. **firebase_options.dart** — run `flutterfire configure` to generate
-   `lib/firebase_options.dart`, then call
+   `android/settings.gradle.kts` and apply it in
+   `android/app/build.gradle.kts`.
+3. **firebase_options.dart** — run `flutterfire configure`, then call
    `Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform)`
    before any FCM usage.
-4. **Swap the push service** — replace `defaultPushService()` in
-   `lib/main.dart` with `const FcmPushService()`. It currently fails closed
-   (throws `StateError`) until `Firebase.apps` is non-empty, so it must not
-   be installed before step 3 succeeds.
-5. **Token API migration** — firebase_messaging 17.x deprecates
+4. **Swap the push service** — replace `defaultPushService()` /
+   `defaultAppStore()` in `lib/main.dart` with `const FcmPushService()`.
+   It still fails closed (throws `StateError`) until step 3 succeeds.
+5. **Token registration** — the app has NO write path to the server.
+   `FcmPushService` obtains the token and the Overview push card
+   displays it (selectable text); the operator registers it with the
+   server-side `tools/notify/register` CLI (bearer-authenticated,
+   tokens stored outside the repo). The card also shows the ask history
+   so the operator can see why push is active or disabled.
+6. **Token API migration** — firebase_messaging 17.x deprecates
    `getToken()`/`onTokenRefresh` in favor of `register()`/`onRegistered`;
-   `FcmPushService.getToken()` keeps the deprecated call (scaffold contract,
-   suppressed lint) and should migrate at handoff.
+   `FcmPushService.getToken()` keeps the deprecated call (scaffold
+   contract, suppressed lint) — migrate at handoff.
+7. **Real-device receipt drill** — dispatch a synthetic event, observe
+   notification tap → Event Detail on a physical device (or via adb).
+   This is a GATES-evidence item, not a CI check.
+
+## Release signing (fail-closed)
+
+The keystore lives **outside the repository** and must never be
+committed. The Gradle config has no quiet fallback: without signing
+config a release build **refuses to run** instead of shipping
+debug-signed.
+
+```sh
+# 1. Create the keystore outside the repo (once).
+mkdir -p ~/.local/share/hongscanner/mobile
+keytool -genkeypair -v -keystore ~/.local/share/hongscanner/mobile/release.keystore \
+  -alias hongscanner -keyalg RSA -keysize 2048 -validity 10000 \
+  -dname "CN=Hong Scanner, OU=Personal, O=HongScanner, L=Seoul, C=KR"
+
+# 2. Create mobile/android/key.properties (gitignored) — absolute path.
+#    storeFile=/home/<user>/.local/share/hongscanner/mobile/release.keystore
+#    storePassword=...
+#    keyAlias=hongscanner
+#    keyPassword=...
+
+# 3. Build the signed release APK.
+flutter build apk --release   # → mobile/build/app/outputs/flutter-apk/app-release.apk
+```
+
+`mobile/.gitignore` blocks `key.properties`, `*.keystore`, `*.jks`.
+APK artifacts are gitignored (`/build/`) and never committed.
+
+## Tests & CI
+
+- `flutter test` — the mobile suite: API client against fake transports
+  (contract shapes, null semantics, error classification), fixture-driven
+  widget tests for all four screens, permission flow (first-run ask once,
+  denial persistence, manual re-ask, unwired), stub-message tap routing
+  (cold start, background tap, foreground banner, bad payloads), and
+  resync (backoff, recovery, lifecycle resume, pull-to-refresh).
+- `flutter analyze` — clean. NOTE: in this repo's non-ASCII checkout path
+  `flutter analyze` crashes (LSP tool bug, exit 255); run it from an
+  ASCII-path copy (`rsync -a --exclude .git mobile/ /tmp/hs-mobile-ascii/`).
+  CI runs on ASCII paths and is unaffected. `flutter test` / `flutter
+  build` work in the non-ASCII path.
+- `.github/workflows/mobile.yml` — runs on `mobile/**` or workflow
+  changes only: analyze + test + `flutter build apk --debug` (no
+  keystore in CI by design), prints `MOBILE SUITE PASSED`.
+  **It is not a required check**: the merge authority stays the ruleset's
+  required `ci` check plus the `ALL CONTRACT SUITES PASSED` gate marker
+  (AGENTS.md §2.1). The main agent reads the mobile run's marker from the
+  run log before merging; a missing run is UNKNOWN, not SUCCESS.
 
 ## Local toolchain used for this scaffold
 
-- Flutter SDK: `~/sdk/flutter` (stable)
+- Flutter SDK: `~/sdk/flutter` (stable 3.47.9)
 - Android SDK: `~/sdk/android-sdk` (platform-tools, build-tools;34.0.0,
-  platforms;android-35, platforms;android-36)
+  platforms;android-34/35/36)
+- JDK: OpenJDK 21
