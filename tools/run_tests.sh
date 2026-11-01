@@ -31,6 +31,7 @@ run nim c -r --hints:off --warnings:off --path:src tests/test_sub_input_contract
 run nim c -r --hints:off --warnings:off --path:src tests/test_vendor_input.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_recorder_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_tickwire_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_event_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_subcheck_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_stream_contract.nim

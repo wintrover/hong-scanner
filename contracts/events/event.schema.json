@@ -1,0 +1,96 @@
+{
+  "x-schema-id": "hong-scanner-event-fact/1",
+  "title": "Hong Scanner event fact record (VS-3)",
+  "description": "Immutable fact record for one judged transition (docs/REPLAY_CONTRACT.md section 13). An event is emitted exactly once by the single judgment function step(state, record) and is never mutated afterwards: no post-hoc verification state and no delivery state may be added to it, because a mutated fact changes its bytes and breaks replay byte-identity (section 13.4). Verification is recorded only in the session-level verify output; delivery state lives only in contracts/events/delivery.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "observed_at",
+    "session_id",
+    "rule_id",
+    "rule_version",
+    "data_quality",
+    "severity",
+    "evidence_ref"
+  ],
+  "properties": {
+    "data_quality": {
+      "description": "Trust the judgment placed in its evidence at emission time. Never upgraded after the fact; degraded evidence stays degraded.",
+      "enum": ["OBSERVING", "INCOMPLETE", "UNKNOWN"],
+      "type": "string"
+    },
+    "direction": {
+      "description": "Judged candidate direction. Present only for events that judged a direction.",
+      "enum": ["UP", "DOWN"],
+      "type": "string"
+    },
+    "event_id": {
+      "description": "Deterministic content address of this fact; see x-event-id-rule. Exactly 64 lowercase hex digits.",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "event_type": {
+      "description": "The full transition vocabulary of the contract. The contract defines all event types; an implementation may lag the vocabulary, the vocabulary never depends on the implementation.",
+      "enum": [
+        "CANDIDATE_ENTERED",
+        "CANDIDATE_UPDATED",
+        "CANDIDATE_EXITED",
+        "FEED_DISCONNECTED",
+        "DATA_GAP_SUSPECTED",
+        "REST_TRUNCATED",
+        "MARKET_STATE_UNKNOWN",
+        "REPLAY_MATCH",
+        "REPLAY_MISMATCH",
+        "SESSION_ENDED",
+        "SESSION_INCOMPLETE",
+        "SESSION_APPROVED"
+      ],
+      "type": "string"
+    },
+    "evidence_ref": {
+      "description": "Non-empty reference to the recorded evidence the judgment consumed. No input seq value may appear here (section 2: the absolute seq value is never emitted in any artifact); record-backed evidence is addressed by content, for example the sha256 hex of the record's canonical line, or by its declared vendor scope, for example ka10027:stex_tp=1:sort_tp=1.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "observed_at": {
+      "description": "When the transition was observed, in the scanner canonical timestamp form YYYY-MM-DDTHH:MM:SS+HH:MM (numeric offset, the same form the calendar bounds use; see hs/sub_input.validIso8601Offset).",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}$",
+      "type": "string"
+    },
+    "rank": {
+      "description": "Candidate rank in the judged direction at the observed moment. Present only for rank-bearing events; 1 is the first rank.",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "rule_id": {
+      "description": "Identifier of the judgment rule that produced this fact; stable across runs and versioned by rule_version.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "rule_version": {
+      "description": "Version of the judgment rule that produced this fact.",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "session_id": {
+      "description": "The session the fact belongs to (in the VS-1 scheme, the session_date).",
+      "minLength": 1,
+      "type": "string"
+    },
+    "severity": {
+      "description": "Operational importance of the fact, judged at emission time. Importance is part of the fact; delivery priority decisions may consume it but never change it.",
+      "enum": ["INFO", "HIGH", "CRITICAL"],
+      "type": "string"
+    },
+    "symbol": {
+      "description": "6-digit KRX code the fact is about. Absent when the fact is not symbol-scoped; the event id's entity is then the wildcard.",
+      "pattern": "^[0-9]{6}$",
+      "type": "string"
+    }
+  },
+  "x-event-id-rule": "event_id is the sha256 digest, lowercase hex, over the UTF-8 bytes of the HCJ canonical serialization of the object {\"entity\":E,\"event_type\":T,\"rule_id\":R,\"session_id\":S,\"transition_seq\":Q}. E is the record's symbol when present and the wildcard \"*\" otherwise; T, R and S are the record's event_type, rule_id and session_id; Q is the input record seq (section 2 envelope) of the record at which the transition was observed. Canonical serialization means the HCJ canonical encoder: object keys in codepoint-ascending order (entity, event_type, rule_id, session_id, transition_seq), no whitespace, integers bare. The rule is therefore a pure function: the same tuple yields the same id, and any differing member, including the recorded position Q, yields a different id. Q itself is never emitted in any artifact (section 2); it enters only this one-way digest, and the record carries no position field. The id is computed at generation time by the same step function on both the live and replay paths; it is not recomputable from the record bytes alone because the record does not carry Q.",
+  "x-immutability-rule": "The record is an immutable fact and this schema is closed (additionalProperties false): every post-hoc field is rejected. verification_status and any session verification state are rejected everywhere (verification lives in the session-level verify output, never in a record). Delivery-state fields such as state, attempts, error_code, provider_message_id or device_id are rejected in the fact (delivery lives in contracts/events/delivery.schema.json). Writing either family into a fact would mutate its bytes and break replay byte-identity (section 13.4).",
+  "x-separation-rule": "Three states, three homes, never one field for two of them: importance and trust are fact fields (severity, data_quality, plus the judged direction and rank); verification state is session-level (the verify output); delivery state is operational (contracts/events/delivery.schema.json)."
+}
