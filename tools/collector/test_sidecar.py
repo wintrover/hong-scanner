@@ -752,8 +752,14 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await h.stop_and_join(), 0)
 
     async def test_watchdog_in_the_past_fires_immediately(self):
-        past = (kst_now() - timedelta(hours=1)).strftime("%H:%M:%S+09:00")
-        h = self.harness(watchdog=past)
+        now = kst_now()
+        past = now - timedelta(hours=1)
+        if past.date() != now.date():
+            # Before 01:00 KST "one hour ago" lands on yesterday, which
+            # parse_watchdog_seconds reads as a time later TODAY; midnight
+            # today is always <= now, so it still fires immediately.
+            past = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        h = self.harness(watchdog=past.strftime("%H:%M:%S+09:00"))
         await h.start()
         await h.wait_for(
             lambda evs: any(e.get("ev") == "timer" and

@@ -1,0 +1,543 @@
+## event generator contract tests (REPLAY_CONTRACT §13, PR-4): the single
+## judgment function step(state, record) -> (state', events) and its
+## end-of-stream judgment finish(), over the committed synthetic fixtures
+## (fixtures/events/gen_session.hcj.jsonl,
+## fixtures/events/gen_incomplete.hcj.jsonl).
+##
+## Covered: the x-event-id-rule over known tuples (the id is sha256 over
+## the canonical serialization of the id tuple, including the input record
+## seq, which is never emitted), the judgment's determinism (same fold
+## twice -> identical bytes; value semantics of the state), the derived
+## observed_at (record content, never a wall clock), the record-first
+## death/restart recovery (a prefix fold is a byte-prefix of the full
+## fold; resuming the recorded stream from the prefix state reproduces
+## exactly the same events), the candidate transition rules (ENTERED /
+## UPDATED rank change / EXITED, the declared-vendor-scope evidence, the
+## one-judgment-per-tuple dedup), the no-verification/no-delivery
+## immutability of every generated fact, and the verify byte comparison
+## of the events artifact (MATCH with the replayed file; tampered or
+## missing file is a MISMATCH, never a pass).
+##
+## Hand-rolled assertions in the repo's contract-suite style; synthetic
+## fixtures only: no network, no vendor data, no wall clock.
+## Run: nim c -r --hints:off --warnings:off --path:src tests/test_event_gen_contract.nim
+import std/[os, strutils, tempfiles]
+import hs/[hcj, digest, records, sub_input, replay, verify, event_gen, binfo]
+
+var failures = 0
+var passes = 0
+
+proc check(name: string; cond: bool) =
+  if cond:
+    inc passes
+    echo "ok   ", name
+  else:
+    inc failures
+    echo "FAIL ", name
+
+# ------------------------------------------------------------------ helpers
+
+const
+  eventFields = @["data_quality", "direction", "event_id", "event_type",
+                  "evidence_ref", "observed_at", "rank", "rule_id",
+                  "rule_version", "session_id", "severity", "symbol"]
+  requiredEventFields = @["data_quality", "event_id", "event_type",
+                          "evidence_ref", "observed_at", "rule_id",
+                          "rule_version", "session_id", "severity"]
+  eventTypes = @["CANDIDATE_ENTERED", "CANDIDATE_UPDATED",
+                 "CANDIDATE_EXITED", "FEED_DISCONNECTED",
+                 "DATA_GAP_SUSPECTED", "REST_TRUNCATED",
+                 "MARKET_STATE_UNKNOWN", "REPLAY_MATCH", "REPLAY_MISMATCH",
+                 "SESSION_ENDED", "SESSION_INCOMPLETE", "SESSION_APPROVED"]
+  severities = @["INFO", "HIGH", "CRITICAL"]
+  dataQualities = @["OBSERVING", "INCOMPLETE", "UNKNOWN"]
+
+proc validateEventLine(line: string): seq[string] =
+  ## Structural validation of one generated fact against the committed
+  ## event schema (closed field set = the immutability rule: any
+  ## verification, delivery or position field is an unknown field).
+  var v: HcjValue
+  try:
+    v = parseLine(line)
+  except CatchableError as e:
+    return @["not parseable: " & e.msg]
+  if canonical(v) != line:
+    result.add("line is not canonical HCJ")
+  if v.kind != hkObj:
+    return @["event: not an object"]
+  for p in v.pairs:
+    if not eventFields.contains(p.k):
+      result.add("event: unknown field: " & p.k)
+  for k in requiredEventFields:
+    if not v.has(k):
+      result.add("event: missing field: " & k)
+  if v.has("event_id") and not validSha256Hex(v.get("event_id").asStr):
+    result.add("event: event_id is not 64 lowercase hex")
+  if v.has("event_type") and not eventTypes.contains(v.get("event_type").asStr):
+    result.add("event: event_type is not a contract event type")
+  if v.has("observed_at") and not validIso8601Offset(v.get("observed_at").asStr):
+    result.add("event: observed_at is not YYYY-MM-DDTHH:MM:SS+HH:MM")
+  for k in ["session_id", "rule_id", "evidence_ref"]:
+    if v.has(k) and v.get(k).asStr.len == 0:
+      result.add("event: " & k & " is empty")
+  if v.has("rule_version") and v.get("rule_version").ival < 1:
+    result.add("event: rule_version must be >= 1")
+  if v.has("symbol") and not validCode(v.get("symbol").asStr):
+    result.add("event: symbol is not a 6-digit code")
+  if v.has("severity") and not severities.contains(v.get("severity").asStr):
+    result.add("event: severity is not INFO|HIGH|CRITICAL")
+  if v.has("data_quality") and
+     not dataQualities.contains(v.get("data_quality").asStr):
+    result.add("event: data_quality is not OBSERVING|INCOMPLETE|UNKNOWN")
+
+proc lineValue(line: string): HcjValue = parseLine(line)
+
+proc fieldOf(line, key: string): string = lineValue(line).get(key).asStr
+
+proc hasField(line, key: string): bool = lineValue(line).has(key)
+
+proc fieldSeq(lines: seq[string]; key: string): seq[string] =
+  for l in lines: result.add(fieldOf(l, key))
+
+proc allCanonical(lines: seq[string]): bool =
+  for l in lines:
+    if canonical(parseLine(l)) != l: return false
+  true
+
+proc allValid(lines: seq[string]): bool =
+  for l in lines:
+    if validateEventLine(l).len != 0: return false
+  true
+
+proc idsDistinct(lines: seq[string]): bool =
+  var seen: seq[string]
+  for l in lines:
+    let id = fieldOf(l, "event_id")
+    if id in seen: return false
+    seen.add(id)
+  true
+
+proc idsUnique(facts: seq[EventFact]): bool =
+  var seen: seq[string]
+  for f in facts:
+    if f.eventId in seen: return false
+    seen.add(f.eventId)
+  true
+
+proc contentRef(r: Record): string =
+  sha256Hex(makeRecordLine(r.seq, r.kind, r.raw))
+
+# ------------------------------------------------------------------ fixtures
+
+let repoRoot = parentDir(parentDir(getAppFilename()))
+let sessionPath = repoRoot / "fixtures" / "events" / "gen_session.hcj.jsonl"
+let incompletePath = repoRoot / "fixtures" / "events" / "gen_incomplete.hcj.jsonl"
+
+block fixtures:
+  check("fixtures: both synthetic fixtures exist",
+        fileExists(sessionPath) and fileExists(incompletePath))
+  let recs = loadRecords(sessionPath)
+  let incRecs = loadRecords(incompletePath)
+  check("fixtures: the sealed stream has 13 records and ends with session_end",
+        recs.len == 13 and recs[^1].kind == kSessionEnd)
+  # Record equality is canonical-line equality: HcjValue has no structural
+  # == (case-object comparison), and the replay contract's identity IS the
+  # canonical line (contentRef).
+  check("fixtures: the incomplete stream is the same prefix without the seal",
+        incRecs.len == 12 and
+        (block:
+           var ok = true
+           for i in 0 ..< incRecs.len:
+             if contentRef(incRecs[i]) != contentRef(recs[i]): ok = false
+           ok))
+  check("fixtures: the sealed stream replays to status rsOk",
+        runCore(recs).status == rsOk)
+  check("fixtures: the unsealed stream is INCOMPLETE, never a pass",
+        runCore(incRecs).status == rsIncomplete)
+
+let recs = loadRecords(sessionPath)
+let events = eventsOfRecords(recs)
+
+# ------------------------------------------------------- generation & shape
+
+block generationShape:
+  check("generation: the sealed session judges exactly 8 facts",
+        events.len == 8)
+  check("generation: every fact line is canonical HCJ",
+        allCanonical(events))
+  check("generation: every fact passes the closed-field validation",
+        allValid(events))
+  check("generation: the event_type sequence is the judgment order",
+        fieldSeq(events, "event_type") == @[
+          "CANDIDATE_ENTERED", "CANDIDATE_ENTERED", "DATA_GAP_SUSPECTED",
+          "DATA_GAP_SUSPECTED", "REST_TRUNCATED", "FEED_DISCONNECTED",
+          "MARKET_STATE_UNKNOWN", "SESSION_ENDED"])
+  check("generation: the rule_id sequence is per rule",
+        fieldSeq(events, "rule_id") == @[
+          "candidate-transition-v1", "candidate-transition-v1",
+          "gap-suspected-v1", "gap-suspected-v1", "rest-truncated-v1",
+          "feed-disconnected-v1", "market-state-unknown-v1",
+          "session-close-v1"])
+  check("generation: every fact carries rule_version 1",
+        (block:
+           var ok = true
+           for l in events:
+             if lineValue(l).get("rule_version").ival != 1: ok = false
+           ok))
+  check("generation: session_id is the config record's session_date",
+        fieldSeq(events, "session_id") ==
+        @["2026-11-02", "2026-11-02", "2026-11-02", "2026-11-02",
+          "2026-11-02", "2026-11-02", "2026-11-02", "2026-11-02"])
+  check("generation: all 8 ids are distinct", idsDistinct(events))
+  check("generation: no position field is ever emitted",
+        (block:
+           var ok = true
+           for l in events:
+             if hasField(l, "transition_seq") or hasField(l, "seq") or
+                hasField(l, "position"): ok = false
+           ok))
+  check("generation: no verification or delivery field exists on any fact",
+        (block:
+           var ok = true
+           for l in events:
+             for k in ["verification_status", "state", "attempts",
+                       "device_id", "error_code", "provider_message_id"]:
+               if hasField(l, k): ok = false
+           ok))
+
+# --------------------------------------------------------- observed_at rules
+
+block observedAt:
+  check("observed_at: candidate facts observe the stream's first derived " &
+        "timestamp (config midnight), never a clock",
+        fieldOf(events[0], "observed_at") ==
+        "2026-11-02T00:00:00+09:00" and
+        fieldOf(events[1], "observed_at") ==
+        "2026-11-02T00:00:00+09:00")
+  check("observed_at: a gap fact observes its own record t",
+        fieldOf(events[2], "observed_at") == "2026-11-02T10:00:00+09:00")
+  check("observed_at: the truncation facts observe their own record t",
+        fieldOf(events[3], "observed_at") == "2026-11-02T10:15:00+09:00" and
+        fieldOf(events[4], "observed_at") == "2026-11-02T10:15:00+09:00")
+  check("observed_at: the feed-disconnection fact observes its record t",
+        fieldOf(events[5], "observed_at") == "2026-11-02T10:25:00+09:00")
+  check("observed_at: the market-state fact observes the ws_raw t",
+        fieldOf(events[6], "observed_at") == "2026-11-02T10:30:00+09:00")
+  check("observed_at: the session_end fact observes the last recorded t " &
+        "(0s FID 20), not a wall clock",
+        fieldOf(events[7], "observed_at") == "2026-11-02T15:30:10+09:00")
+  check("observed_at: the evidenced 0s record (seq 12) judges exactly no " &
+        "fact — its t never appears as an unevidenced observation",
+        events.len == 8 and
+        fieldOf(events[6], "evidence_ref") == contentRef(recs[10]))
+
+# ------------------------------------------------------------- the id rule
+
+proc idFor(eventType, ruleId, entity: string; q: int): string =
+  eventIdOf("2026-11-02", eventType, ruleId, entity, q)
+
+block eventIdRule:
+  check("event_id: candidate UP 005930 is the rule over its tuple at Q=4",
+        fieldOf(events[0], "event_id") ==
+        idFor("CANDIDATE_ENTERED", "candidate-transition-v1", "005930", 4))
+  check("event_id: candidate DOWN 000660 is the rule over its tuple at Q=4",
+        fieldOf(events[1], "event_id") ==
+        idFor("CANDIDATE_ENTERED", "candidate-transition-v1", "000660", 4))
+  check("event_id: the symbol gap fact binds to Q=5",
+        fieldOf(events[2], "event_id") ==
+        idFor("DATA_GAP_SUSPECTED", "gap-suspected-v1", "005930", 5))
+  check("event_id: the connection-wide gap fact binds to Q=7 with the " &
+        "wildcard entity",
+        fieldOf(events[3], "event_id") ==
+        idFor("DATA_GAP_SUSPECTED", "gap-suspected-v1", "*", 7))
+  check("event_id: the truncation fact differs from the gap fact of the " &
+        "same record only by event_type",
+        fieldOf(events[4], "event_id") ==
+        idFor("REST_TRUNCATED", "rest-truncated-v1", "*", 7) and
+        fieldOf(events[3], "event_id") != fieldOf(events[4], "event_id"))
+  check("event_id: the feed disconnection binds to Q=9",
+        fieldOf(events[5], "event_id") ==
+        idFor("FEED_DISCONNECTED", "feed-disconnected-v1", "*", 9))
+  check("event_id: the market-state fact binds to Q=11",
+        fieldOf(events[6], "event_id") ==
+        idFor("MARKET_STATE_UNKNOWN", "market-state-unknown-v1", "*", 11))
+  check("event_id: the session close binds to the seal record Q=13",
+        fieldOf(events[7], "event_id") ==
+        idFor("SESSION_ENDED", "session-close-v1", "*", 13))
+  check("event_id: a differing Q yields a different id",
+        idFor("SESSION_ENDED", "session-close-v1", "*", 13) !=
+        idFor("SESSION_ENDED", "session-close-v1", "*", 12))
+  check("event_id: the id is a pure function of the tuple",
+        idFor("CANDIDATE_ENTERED", "candidate-transition-v1", "005930", 4) ==
+        idFor("CANDIDATE_ENTERED", "candidate-transition-v1", "005930", 4))
+
+# -------------------------------------------------------------- evidence_ref
+
+block evidenceRef:
+  check("evidence_ref: candidate facts name the declared vendor scope",
+        fieldOf(events[0], "evidence_ref") == "ka10027:stex_tp=1:sort_tp=1" and
+        fieldOf(events[1], "evidence_ref") == "ka10027:stex_tp=1:sort_tp=3")
+  check("evidence_ref: record-backed facts are content addresses of the " &
+        "consumed record's canonical line",
+        fieldOf(events[2], "evidence_ref") == contentRef(recs[4]) and
+        fieldOf(events[3], "evidence_ref") == contentRef(recs[6]) and
+        fieldOf(events[4], "evidence_ref") == contentRef(recs[6]) and
+        fieldOf(events[5], "evidence_ref") == contentRef(recs[8]) and
+        fieldOf(events[6], "evidence_ref") == contentRef(recs[10]) and
+        fieldOf(events[7], "evidence_ref") == contentRef(recs[12]))
+
+# ----------------------------------------------------- determinism & purity
+
+block determinism:
+  let again = eventsOfRecords(recs)
+  check("determinism: the same fold twice yields the same bytes",
+        again == events)
+  var s0 = initEventGenState()
+  var manual: seq[string]
+  for r in recs:
+    let (s1, evs) = step(s0, r)
+    s0 = s1
+    for f in evs:
+      manual.add(eventLine(f))
+  for f in finish(s0):
+    manual.add(eventLine(f))
+  check("determinism: a per-record step loop is byte-identical to the " &
+        "replay fold (one judgment, two drivers)",
+        manual == events)
+  let fresh = initEventGenState()
+  let before = $fresh.lastSeq & "|" & fresh.lastEvidence
+  discard step(fresh, recs[2])
+  check("determinism: step is a value function — the caller's state is " &
+        "never mutated in place",
+        ($fresh.lastSeq & "|" & fresh.lastEvidence) == before)
+
+# --------------------------------------- record-first recovery (death/restart)
+
+proc foldFrom(s: EventGenState; rs: seq[Record]): seq[string] =
+  var st = s
+  for r in rs:
+    let (s2, evs) = step(st, r)
+    st = s2
+    for f in evs:
+      result.add(eventLine(f))
+  for f in finish(st):
+    result.add(eventLine(f))
+
+proc stepEvents(recs: seq[Record]): seq[string] =
+  ## What a live process wrote to its events log by the time it died at the
+  ## end of `recs`: the per-record judgments only — a dead process never
+  ## reaches the end-of-stream judgment.
+  var s = initEventGenState()
+  for r in recs:
+    let (s2, evs) = step(s, r)
+    s = s2
+    for f in evs:
+      result.add(eventLine(f))
+
+block recovery:
+  let prefix = recs[0 ..< 8]
+  let prefixEvents = stepEvents(prefix)
+  check("recovery: the events judged before the crash are a byte-prefix " &
+        "of the full judgment (nothing lost, nothing rewritten)",
+        prefixEvents.len < events.len and
+        events[0 ..< prefixEvents.len] == prefixEvents)
+  let resumed = foldFrom(stateAt(prefix), recs[8 ..< recs.len])
+  check("recovery: resuming the recorded stream from the last judgment " &
+        "state reproduces exactly the missing events",
+        resumed == events[prefixEvents.len ..< events.len])
+  check("recovery: prefix + resume is the whole judgment",
+        prefixEvents & resumed == events)
+  let incRecs = loadRecords(incompletePath)
+  let incEvents = eventsOfRecords(incRecs)
+  check("recovery: the unsealed stream ends with SESSION_INCOMPLETE",
+        incEvents.len == 8 and
+        fieldOf(incEvents[^1], "event_type") == "SESSION_INCOMPLETE")
+  check("recovery: the incomplete fact binds to the last consumed record " &
+        "(Q=12) and carries its content address",
+        fieldOf(incEvents[^1], "event_id") ==
+        eventIdOf("2026-11-02", "SESSION_INCOMPLETE", "session-incomplete-v1",
+                  "*", 12) and
+        fieldOf(incEvents[^1], "evidence_ref") ==
+        contentRef(incRecs[11]) and
+        fieldOf(incEvents[^1], "severity") == "HIGH" and
+        fieldOf(incEvents[^1], "data_quality") == "INCOMPLETE")
+  check("recovery: finish() on a sealed stream judges nothing",
+        finish(stateAt(recs)).len == 0)
+  let prefixFinish = finish(stateAt(prefix))
+  check("recovery: finish() on a consumed prefix judges exactly one fact",
+        prefixFinish.len == 1 and
+        prefixFinish[0].eventType == "SESSION_INCOMPLETE")
+  check("recovery: the live definition (prefix fold + resume + finish) " &
+        "matches the replay fold of the unsealed stream",
+        foldFrom(stateAt(prefix), incRecs[8 ..< incRecs.len]) ==
+        incEvents[prefixEvents.len ..< incEvents.len])
+
+# ------------------------------------------------------ candidate transitions
+
+proc hexOf(s: string): string =
+  const digits = "0123456789abcdef"
+  for i in 0 ..< s.len:
+    let b = byte(s[i])
+    result.add(digits[int(b shr 4)])
+    result.add(digits[int(b and 0x0f'u8)])
+
+proc restRecord(seqNo: int; sortTp: string; codes: seq[string];
+                contYn = "N"): Record =
+  ## A synthetic terminal ka10027 page: the declared scope, a preserved
+  ## body affirming success (return_code 0 + the documented list key).
+  var rows: seq[HcjValue]
+  for c in codes:
+    rows.add(hObj(
+      ("buy_req", hStr("500")), ("cnt", hStr("1")),
+      ("cntr_str", hStr("0")), ("cur_prc", hStr("70000")),
+      ("flu_rt", hStr("3.50")), ("now_trde_qty", hStr("100")),
+      ("pred_pre", hStr("500")), ("pred_pre_sig", hStr("2")),
+      ("sel_req", hStr("1000")), ("stk_cd", hStr(c)),
+      ("stk_cls", hStr("2")), ("stk_nm", hStr("synthetic"))))
+  let body = canonical(hObj(("pred_pre_flu_rt_upper", hArrSeq(rows)),
+                            ("return_code", hInt(0)),
+                            ("return_msg", hStr("synthetic"))))
+  Record(seq: seqNo, kind: kRestResp, raw: hObj(
+    ("api_id", hStr("ka10027")),
+    ("body_hex", hStr(hexOf(body))),
+    ("cont_yn", hStr(contYn)),
+    ("next_key", hStr(if contYn == "Y": "k" else: "")),
+    ("page", hInt(1)),
+    ("query", hObj(
+      ("crd_cnd", hStr("0")), ("mrkt_tp", hStr("000")),
+      ("pric_cnd", hStr("0")), ("sort_tp", hStr(sortTp)),
+      ("stk_cnd", hStr("0")), ("stex_tp", hStr("1")),
+      ("trde_prica_cnd", hStr("0")), ("trde_qty_cnd", hStr("0000")),
+      ("updown_incls", hStr("1")))),
+    ("status", hInt(200))))
+
+proc summary(evs: seq[EventFact]): string =
+  for f in evs:
+    result.add(f.eventType & "/" & f.symbol & "/" & f.direction & "/" &
+      $f.rank & " ")
+
+block candidateTransitions:
+  var s = stateAt(recs[0 ..< 2])
+  # first generation: up [005930], down [000660]
+  let (s1, e1) = step(s, restRecord(3, "1", @["005930"]))
+  s = s1
+  check("candidates: an up chain alone judges nothing", e1.len == 0)
+  let (s2, e2) = step(s, restRecord(4, "3", @["000660"]))
+  s = s2
+  check("candidates: the first completed up+down pair enters both " &
+        "candidates with rank and direction",
+        e2.summary() ==
+        "CANDIDATE_ENTERED/005930/UP/1 CANDIDATE_ENTERED/000660/DOWN/1 ")
+  check("candidates: the derivation binds to the completing record (Q=4)",
+        e2[0].eventId == eventIdOf("2026-11-02", "CANDIDATE_ENTERED",
+                                   "candidate-transition-v1", "005930", 4))
+  check("candidates: the evidence is the declared vendor scope of the " &
+        "judged direction",
+        e2[0].evidenceRef == "ka10027:stex_tp=1:sort_tp=1" and
+        e2[1].evidenceRef == "ka10027:stex_tp=1:sort_tp=3")
+  # poll 1: 000660 moved from down to up (rank 2); 005930 persists at rank 1
+  let (s3, e3) = step(s, restRecord(5, "1", @["005930", "000660"]))
+  s = s3
+  let (s4, e4) = step(s, restRecord(6, "3", @[]))
+  s = s4
+  check("candidates: a poll judges the move (EXITED down, ENTERED up) " &
+        "and stays silent about the unchanged rank",
+        e4.summary() ==
+        "CANDIDATE_ENTERED/000660/UP/2 CANDIDATE_EXITED/000660/DOWN/0 ")
+  # poll 2: the up ranking swaps places — an UPDATED rank change
+  let (s5, e5) = step(s, restRecord(7, "1", @["000660", "005930"]))
+  s = s5
+  let (s6, e6) = step(s, restRecord(8, "3", @[]))
+  s = s6
+  check("candidates: a rank change is CANDIDATE_UPDATED with the new rank",
+        e6.summary() ==
+        "CANDIDATE_UPDATED/000660/UP/1 CANDIDATE_UPDATED/005930/UP/2 ")
+  # poll 3: everything drops out of both rankings
+  let (s7, e7) = step(s, restRecord(9, "1", @[]))
+  s = s7
+  let (s8, e8) = step(s, restRecord(10, "3", @[]))
+  s = s8
+  check("candidates: a dropped candidate exits without a rank",
+        e8.summary() ==
+        "CANDIDATE_EXITED/000660/UP/0 CANDIDATE_EXITED/005930/UP/0 ")
+  # dedup: a code the vendor lists in BOTH directions is judged once (up first)
+  let (s9, e9) = step(s, restRecord(11, "1", @["005930"]))
+  s = s9
+  let (s10, e10) = step(s, restRecord(12, "3", @["005930"]))
+  s = s10
+  check("candidates: a both-directions code is judged once, in the up " &
+        "direction — one fact per id tuple",
+        e10.summary() == "CANDIDATE_ENTERED/005930/UP/1 " and
+        idsUnique(e10))
+  # an unterminated chain (cont-yn Y) judges nothing
+  let (s11, e11) = step(s, restRecord(13, "1", @["005930"], contYn = "Y"))
+  s = s11
+  check("candidates: a chain that never terminates judges nothing (the " &
+        "stream-level audit rejects it; no event leaks past)",
+        e11.len == 0)
+  discard s
+
+# ------------------------------------------------- verify byte comparison
+
+block verifyByteCompare:
+  let fixtureInfo = BuildInfo(codeCommit: "fixture", sourceRef: "main",
+    originMainSha: "fixture", dirty: false, nimVersion: NimVersion,
+    buildTime: "fixture")
+  let res = runCore(recs)
+  let tmp = createTempDir("hs-eventgen-test-", "")
+  defer: removeDir(tmp)
+  let runDir = writeRun(tmp / "run", sessionPath, res, fixtureInfo)
+  let v = verifyRun(runDir, fixtureInfo)
+  check("verify: a replay-written run verifies MATCH",
+        v.verdict == vMatch and v.matched)
+  check("verify: the events hash is the artifact's sha256",
+        v.eventsSha256 == sha256Hex(readFile(runDir / eventsFile)) and
+        v.eventsSha256.len == 64)
+  check("verify: the replayed events are byte-identical to the fold",
+        readFile(runDir / eventsFile) == linesText(res.events))
+  let manifest = readFile(runDir / checksumsFile)
+  var manifestCoversEvents = false
+  for line in manifest.split('\n'):
+    if line.endsWith("  " & eventsFile): manifestCoversEvents = true
+  check("verify: CHECKSUMS.sha256 covers the events artifact",
+        manifestCoversEvents)
+  # A live-produced events file that is byte-exact (as proven above for
+  # this stream) passes the comparison; differing live bytes never do.
+  writeFile(runDir / eventsFile,
+            readFile(runDir / eventsFile) & "{\"tampered\":true}\n")
+  let vBad = verifyRun(runDir, fixtureInfo)
+  var namedIssue = false
+  for issue in vBad.issues:
+    if "events.hcj.jsonl differs from replay" in issue: namedIssue = true
+  check("verify: tampered live event bytes are a MISMATCH with a named " &
+        "issue, never a pass",
+        vBad.verdict == vMismatch and namedIssue and not vBad.matched)
+  check("verify: the reported EVENTS hash still names the recomputation " &
+        "when the artifact differs",
+        vBad.eventsSha256 == v.eventsSha256)
+  removeFile(runDir / eventsFile)
+  let vMissing = verifyRun(runDir, fixtureInfo)
+  var missingIssue = false
+  for issue in vMissing.issues:
+    if "missing artifact: events.hcj.jsonl" in issue: missingIssue = true
+  check("verify: a missing events artifact is fail-closed MISMATCH",
+        vMissing.verdict == vMismatch and missingIssue)
+
+# ---------------------------------------------------------- incomplete replay
+
+block incompleteReplay:
+  let incRecs = loadRecords(incompletePath)
+  let res = runCore(incRecs)
+  check("incomplete: runCore carries the judgment lines including the " &
+        "SESSION_INCOMPLETE tail",
+        res.events.len == 8 and
+        res.events[^1].contains("\"SESSION_INCOMPLETE\""))
+
+# ------------------------------------------------------------------- summary
+
+if failures == 0:
+  echo "EVENT GENERATOR CONTRACT PASSED (", passes, " checks)"
+else:
+  echo "EVENT GENERATOR CONTRACT FAILED: ", failures, " of ",
+       passes + failures
+  quit(1)
