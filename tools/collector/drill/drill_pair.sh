@@ -288,6 +288,30 @@ SHA_FILE=$(sha256sum "$INPUT_A" | cut -d' ' -f1)
 SHA_MARKER=$(env -u PYTHONPATH python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$MARKER_A")
 check_eq "A: marker sha256 == sealed log bytes" "$SHA_FILE" "$SHA_MARKER"
 
+# Event-fact evidence: the collector's live judgment log (§13.4). Scenario
+# A is a clean session — no gaps, no disconnection (the census's ws_conn=1
+# open-only), the market state evidenced by 0s FID 215 — so exactly the
+# up/down candidate derivations and the seal's session close are judged.
+EVENTS_A="$OUT/a/session/events.hcj.jsonl"
+if [ -f "$EVENTS_A" ]; then
+  ok "A: live events.hcj.jsonl exists"
+  EVENTS_LINES=$(wc -l < "$EVENTS_A" | tr -d ' ')
+  EVENTS_ENDED=$(grep -c 'SESSION_ENDED' "$EVENTS_A" || true)
+  EVENTS_ENTERED=$(grep -c 'CANDIDATE_ENTERED' "$EVENTS_A" || true)
+  EVENTS_ALL=$(cat "$EVENTS_A")
+else
+  bad "A: live events.hcj.jsonl missing"
+  EVENTS_LINES="missing"; EVENTS_ENDED="missing"
+  EVENTS_ENTERED="missing"; EVENTS_ALL=""
+fi
+check_eq "A: three judged facts (2 candidate entries + the session close)" \
+  3 "$EVENTS_LINES"
+check_eq "A: exactly one SESSION_ENDED (the seal judgment)" 1 "$EVENTS_ENDED"
+check_eq "A: exactly two CANDIDATE_ENTERED (the up/down derivations)" \
+  2 "$EVENTS_ENTERED"
+check_not_contains "A: no event line carries a seq field (closed facts)" \
+  "$EVENTS_ALL" '"seq"'
+
 # Wire-log evidence (fake server view).
 WIRE_A=$(cat "$OUT/a/wire.log")
 check_contains "A: wire: client sent LOGIN" "$WIRE_A" '"ev": "ws_send", "trnm": "LOGIN"'
@@ -313,6 +337,21 @@ CODE_C_REPLAY=$?
 # the collector's out basename ("session") so the marker's run_id stays
 # valid (recorder.readCommitMarker binds run_id to the parent basename).
 cp "$MARKER_A" "$OUT/a-verify/session/input.hcj.jsonl.committed"
+# Stage the LIVE event bytes byte-exact, like the marker: the byte
+# comparison in verify then runs against what the collector actually
+# wrote, not against replay's own recomputation (they agree here, so the
+# stage is a no-op byte-wise — but it is the live artifact verify audits).
+EVENTS_C="$OUT/a-verify/session/events.hcj.jsonl"
+if [ -f "$EVENTS_A" ] && [ -f "$EVENTS_C" ]; then
+  cmp -s "$EVENTS_A" "$EVENTS_C" \
+    && ok "C: replayed events are byte-identical to the live events log" \
+    || bad "C: replayed events differ from the live events log"
+  cp "$EVENTS_A" "$EVENTS_C"
+  EVENTS_SHA=$(sha256sum "$EVENTS_A" | cut -d' ' -f1)
+else
+  bad "C: events artifacts missing (live=$EVENTS_A replayed=$EVENTS_C)"
+  EVENTS_SHA="none"
+fi
 "$HS" verify --run "$OUT/a-verify/session" \
   >"$OUT/a/verify.stdout" 2>"$OUT/a/verify.stderr"
 CODE_C_VERIFY=$?
@@ -333,6 +372,8 @@ check_contains "C: verify saw the teardown (remove_acks_0b=1)" "$VERIFY_A_OUT" "
 check_contains "C: verify close evidence (close_values=4)" "$VERIFY_A_OUT" "close_values=4"
 check_contains "C: verify verdict is the dev-build provenance ceiling" \
   "$VERIFY_A_OUT" "VERDICT MISMATCH provenance=INVALID"
+check_contains "C: verify EVENTS= names the live events log bytes" \
+  "$VERIFY_A_OUT" "EVENTS=$EVENTS_SHA"
 check_not_contains "C: verify is NOT INCOMPLETE" \
   "$VERIFY_A_OUT$VERIFY_A_ERR" "INCOMPLETE"
 check_not_contains "C: no byte mismatch issues" "$VERIFY_A_ERR" "differs from replay"

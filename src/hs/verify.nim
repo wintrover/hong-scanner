@@ -23,6 +23,12 @@ type
     verdict*: Verdict
     issues*: seq[string]
     matched*: bool
+    ## sha256 hex of the replay-regenerated event facts
+    ## (events.hcj.jsonl bytes), set whenever the core replay produced
+    ## them. Reported on the verify output as EVENTS=<hex>; when the
+    ## run's events artifact differs, the mismatch is a MISMATCH issue
+    ## and the hash still names the recomputation.
+    eventsSha256*: string
     ## Durable-completion verdict for the input stream's COMMITTED marker
     ## ("VALID"/"ABSENT"/"INVALID"), "" when the input could not even be
     ## classified. Reported on the verify output as COMMIT=<state>; enforced
@@ -42,6 +48,7 @@ const
   inputFile* = "input.hcj.jsonl"
   barsFile* = "bars.hcj.jsonl"
   signalsFile* = "signals.hcj.jsonl"
+  eventsFile* = "events.hcj.jsonl"
   runFile* = "run.json"
   checksumsFile* = "CHECKSUMS.sha256"
 
@@ -55,14 +62,14 @@ proc exitCode*(v: Verdict): int =
   of vMismatch: 6
   of vInvalidProvenance: 7
 
-proc linesText(lines: seq[string]): string =
+proc linesText*(lines: seq[string]): string =
   ## LF after every line, including the last one. Empty input -> empty file.
   for l in lines: result.add(l & "\n")
 
 proc checksums*(dir: string): string =
   ## sha256 manifest over the deterministic artifacts, sorted by file name.
   var rows: seq[string]
-  for name in [barsFile, inputFile, signalsFile]:
+  for name in [barsFile, eventsFile, inputFile, signalsFile]:
     let path = dir / name
     if not fileExists(path):
       raise newException(IOError, "missing artifact: " & path)
@@ -258,12 +265,15 @@ proc writeRun*(dir: string; inputPath: string; res: CoreResult;
   let inputBytes = readFile(inputPath)
   let barsText = linesText(barLines)
   let sigsText = linesText(sigLines)
+  let eventsText = linesText(res.events)
   let manifest = manifestText([(name: inputFile, data: inputBytes),
                                (name: barsFile, data: barsText),
+                               (name: eventsFile, data: eventsText),
                                (name: signalsFile, data: sigsText)])
   let artifacts: seq[RunArtifact] = @[
     (name: inputFile, data: inputBytes),
     (name: barsFile, data: barsText),
+    (name: eventsFile, data: eventsText),
     (name: signalsFile, data: sigsText),
     (name: runFile, data: canonical(buildRunJson(res, bi, recs)) & "\n"),
     (name: checksumsFile, data: manifest)]
@@ -290,9 +300,13 @@ proc runVerdictFromException(e: ref CatchableError): Verdict =
 proc artifactsOk(dir: string; res: CoreResult; issues: var seq[string]) =
   ## Artifact-level failures (missing files, byte or manifest mismatch) are
   ## MISMATCH issues. Missing artifacts are reported as issues, never raised:
-  ## a broken run directory is exit 6, not a contract crash.
+  ## a broken run directory is exit 6, not a contract crash. events.hcj.jsonl
+  ## is the recorded judgment layer's artifact (REPLAY_CONTRACT §13.4): a
+  ## run directory may carry the live-produced file (carried byte-exact from
+  ## the session directory) or the replay-regenerated one — either way it
+  ## must equal the recomputation before any MATCH.
   var allPresent = true
-  for name in [barsFile, inputFile, signalsFile]:
+  for name in [barsFile, eventsFile, inputFile, signalsFile]:
     if not fileExists(dir / name):
       issues.add("missing artifact: " & name)
       allPresent = false
@@ -308,6 +322,9 @@ proc artifactsOk(dir: string; res: CoreResult; issues: var seq[string]) =
   for s in res.signals: sigLines.add(signalLine(s))
   if fileExists(dir / signalsFile) and readFile(dir / signalsFile) != linesText(sigLines):
     issues.add("signals.hcj.jsonl differs from replay")
+  if fileExists(dir / eventsFile) and
+     readFile(dir / eventsFile) != linesText(res.events):
+    issues.add("events.hcj.jsonl differs from replay")
 
 proc strField(parent: HcjValue; key: string; issues: var seq[string]): string =
   ## String field of run.json: absent -> "" (the comparisons catch it),
@@ -489,6 +506,9 @@ proc verifyRun*(dir: string; bi: BuildInfo = buildInfo): VerifyResult =
       return
     of rsOk:
       discard
+    # The event facts recomputation hash (§13.4): named on the verify
+    # output for every verdict past the run-status gate.
+    result.eventsSha256 = sha256Hex(linesText(res.events))
     # Commit gate (§12.5 approval coding): sealed + VALID marker is the
     # only durable completion a durable-recorder stream (environment
     # declared) may be approved on. Sealed alone is INCOMPLETE

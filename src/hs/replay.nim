@@ -3,7 +3,7 @@
 ## verdict is inside input.hcj.jsonl (plan §3.0/§3.1).
 import std/[strutils, algorithm]
 import hcj, records, calendars, bars, engine, rest_resp, sub_input, vendor_input,
-       tickwire, subcheck
+       tickwire, subcheck, event_gen
 
 type
   Config* = object
@@ -55,6 +55,12 @@ type
     ## re-derived from the 0s ws_raw payloads (the close-evidence subset is
     ## tickwire.closeEvidence215).
     closeValues*: seq[string]
+    ## The event facts (REPLAY_CONTRACT §13), as canonical HCJ lines in
+    ## judgment order: the single judgment function (event_gen.step)
+    ## folded over the recorded stream in seq order, then its
+    ## end-of-stream judgment. Produced by exactly one fold, shared with
+    ## the live path — there is no second event judgment.
+    events*: seq[string]
 
 proc intOr(raw: HcjValue; key: string; dflt: int): int =
   if raw.kind == hkObj and raw.has(key) and raw.get(key).kind == hkInt:
@@ -185,6 +191,15 @@ proc runCore*(recs: seq[Record]): CoreResult =
   let cal = recs[0].raw
   result.config = parseConfig(recs[1].raw)
   result.spec = sessionFor(cal, result.config.sessionDate)
+  # The event facts (REPLAY_CONTRACT §13): one fold of the single
+  # judgment function over the recorded stream, before the bars loop so
+  # the judgment consumes exactly the recorded records in seq order
+  # (§13.2/§13.3). A judgment-layer failure is a contract failure of the
+  # run, never a silent pass.
+  try:
+    result.events = eventsOfRecords(recs)
+  except EventGenError as e:
+    raise newException(RecordError, e.msg)
   var b = initBars(result.spec)
   var sawEnd = false
   var restAttempts: seq[RestRespAttempt] = @[]

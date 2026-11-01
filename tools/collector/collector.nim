@@ -17,7 +17,7 @@
 ##                [--calendar=<path>] [--mrkt-tp=000] ... (declared query
 ##                scope, approved PH-1 values by default).
 import std/[os, osproc, strutils, posix, times, streams]
-import hs/[hcj, records, calendars, engine, collector, recorder]
+import hs/[hcj, records, calendars, engine, collector, recorder, event_gen]
 
 const usageText = """collector — the VS-2 live collector (demo, PH-1)
 
@@ -134,6 +134,67 @@ proc readLine(r: var PipeReader; timeoutMs: int): (ReadResult, string) =
     for i in 0 ..< n:
       r.acc.add(chunk[i])
 
+# ------------------------------------------------------------- events journal
+
+const oNoFollow = cint(0o400000) ## Linux `O_NOFOLLOW`; not in std/posix.
+
+type
+  EventsLogError* = object of CatchableError
+
+  EventsLog = object
+    ## The live event journal (REPLAY_CONTRACT §13): every judged fact
+    ## appended in judgment order, each as one complete canonical HCJ
+    ## line + LF, strictly AFTER its evidence record exists in
+    ## input.hcj.jsonl (record-first, §13.2). The journal is derived
+    ## evidence: a crash loses nothing that replaying the recorded
+    ## stream cannot reconstruct, so it carries the recorder's
+    ## exclusive-creation and complete-line discipline but no seal
+    ## protocol — the seal belongs to the input log alone.
+    fd: cint
+    path: string
+    count: int
+
+proc openEventsLog(path: string): EventsLog =
+  ## Exclusive creation next to the input log: an existing journal is
+  ## prior evidence, never overwritten, exactly like openRecorder's rule
+  ## for the input log.
+  let fd = posix.open(path.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                      oNoFollow or O_CLOEXEC, 0o644)
+  if fd < 0:
+    if errno == EEXIST:
+      raise newException(EventsLogError,
+        "COLLECTOR REFUSED: the live events journal already exists, " &
+        "refusing to overwrite: " & path)
+    raise newException(EventsLogError,
+      "COLLECTOR REFUSED: cannot create the live events journal " & path &
+      ": " & $strerror(errno))
+  EventsLog(fd: fd, path: path)
+
+proc appendEvent(el: var EventsLog; line: string) =
+  ## One complete canonical event line + LF, EINTR-retried like the
+  ## recorder's writes. A hard error closes the fd: every later append
+  ## is refused, so a torn line can never be followed by more lines.
+  var buf = line & "\n"
+  var off = 0
+  while off < buf.len:
+    let n = posix.write(el.fd, cast[pointer](unsafeAddr buf[off]),
+                        buf.len - off)
+    if n > 0:
+      inc off, n
+    elif n < 0 and errno == EINTR:
+      discard
+    else:
+      discard posix.close(el.fd)
+      el.fd = -1
+      raise newException(IOError,
+        "events journal write failed: " & el.path & ": " & $strerror(errno))
+  inc el.count
+
+proc closeEventsLog(el: var EventsLog) =
+  if el.fd >= 0:
+    discard posix.close(el.fd)
+    el.fd = -1
+
 # ------------------------------------------------------------------- main
 
 proc main(): int =
@@ -200,6 +261,45 @@ proc main(): int =
   except RecorderError as e:
     fail(2, "COLLECTOR RECORDER: " & e.msg)
 
+  # The live event journal: created exclusively next to the input log
+  # (an existing journal is prior evidence, never overwritten).
+  var elog: EventsLog
+  try:
+    elog = openEventsLog(outDir / "events.hcj.jsonl")
+  except EventsLogError:
+    try:
+      rec.abandon()
+    except CatchableError:
+      discard
+    fail(2, getCurrentExceptionMsg())
+  defer:
+    closeEventsLog(elog)
+
+  # The single judgment function (REPLAY_CONTRACT §13.1): every record
+  # the recorder has numbered is fed to it in recorder seq order
+  # (§13.3), and the judged facts are appended to the journal in
+  # judgment order. Replay folds the very same function over the same
+  # records; there is no second judgment.
+  var egen = initEventGenState()
+
+  proc judge(kind: Kind; raw: HcjValue; seqNo: int) =
+    let r = Record(seq: seqNo, kind: kind, raw: raw)
+    let (s2, evs) = step(egen, r)
+    egen = s2
+    for f in evs:
+      elog.appendEvent(eventLine(f))
+
+  proc sealEvents() =
+    ## The end-of-stream judgment (event_gen.finish): SESSION_INCOMPLETE
+    ## on an honest incomplete exit; a no-op once the stream is sealed.
+    ## Best effort on failure paths only — the input log is the
+    ## authoritative evidence and replay reconstructs the journal.
+    try:
+      for f in finish(egen):
+        elog.appendEvent(eventLine(f))
+    except CatchableError:
+      discard
+
   # Launch the sidecar (no shell): its stderr stays ours for diagnosis; its
   # stdout is the event pipe, its stdin the command pipe.
   let p = startProcess(pythonCmd(), args = @[sidecarScript()],
@@ -225,7 +325,8 @@ proc main(): int =
       rec.abandon()
       fail(4, "COLLECTOR INCOMPLETE: the sidecar stdin broke at init")
     for (kind, raw) in cfg.preambleRecords():
-      discard rec.append(kind, raw)
+      let sq = rec.append(kind, raw)
+      judge(kind, raw, sq)
   except RecorderError as e:
     try:
       rec.abandon()
@@ -233,12 +334,21 @@ proc main(): int =
       discard
     fail(4, "COLLECTOR INCOMPLETE: the recorder failed during the preamble: " &
       e.msg)
+  except CatchableError as e:
+    try:
+      rec.abandon()
+    except CatchableError:
+      discard
+    fail(2, "COLLECTOR CONTRACT: the event judgment failed during the " &
+      "preamble (the records are durable, the events journal is short): " &
+      e.msg)
 
   var reader = PipeReader(fd: p.outputHandle())
   var nextSync = epochTime() + 60.0
   var stopSent = false
 
   template preserveAndExit(code: int; msg: string) {.dirty.} =
+    sealEvents()
     try:
       rec.abandon()
     except CatchableError:
@@ -277,9 +387,12 @@ proc main(): int =
         "(exit code " & $p.peekExitCode() & ")")
       try:
         for (kind, raw) in gapRecords:
-          discard rec.append(kind, raw)
+          let sq = rec.append(kind, raw)
+          judge(kind, raw, sq)
       except RecorderError:
         discard
+      except CatchableError:
+        discard   # best effort here: the input log is the authority
       preserveAndExit(4, "COLLECTOR INCOMPLETE: the sidecar pipe closed " &
         "before the termination protocol completed")
     of rrLine:
@@ -294,15 +407,28 @@ proc main(): int =
         preserveAndExit(2, "COLLECTOR CONTRACT: " & e.msg)
       try:
         for (kind, raw) in recs:
-          discard rec.append(kind, raw)
+          let sq = rec.append(kind, raw)
+          judge(kind, raw, sq)
       except RecorderError as e:
         preserveAndExit(4, "COLLECTOR INCOMPLETE: the recorder refused a " &
           "record; preserve and inspect the file: " & e.msg)
+      except CatchableError as e:
+        preserveAndExit(2, "COLLECTOR CONTRACT: the event judgment failed " &
+          "(the record is durable, the events journal is short; everything " &
+          "is preserved): " & e.msg)
       if c.done and not rec.finished():
         # §8 normal order: finish() (seal + COMMITTED marker) BEFORE stop.
+        var sealed = false
         try:
-          discard rec.finish()
+          let total = rec.finish()
+          sealed = true
+          judge(kSessionEnd, hNull(), total)
         except CatchableError as e:
+          if sealed:
+            preserveAndExit(2, "COLLECTOR CONTRACT: the stream IS sealed " &
+              "(the COMMIT marker was written) but the seal record's event " &
+              "judgment failed; the journal is reconstructible by replay, " &
+              "everything is preserved: " & e.msg)
           preserveAndExit(4, "COLLECTOR INCOMPLETE: the finish protocol " &
             "did not reach the COMMITTED marker: " & e.msg)
       for d in directives:
@@ -322,7 +448,7 @@ proc main(): int =
   if sidecarCode != 0:
     fail(4, "COLLECTOR INCOMPLETE: the sidecar exited " & $sidecarCode &
       " after stop (the stream is sealed; inspect the run directory)")
-  echo "COLLECTOR DONE records=", rec.seqNo()
+  echo "COLLECTOR DONE records=", rec.seqNo(), " events=", elog.count
   0
 
 when isMainModule:

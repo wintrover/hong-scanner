@@ -40,7 +40,7 @@ proc cmdReplay(input, outDir: string): int =
       discard
     discard writeRun(outDir, input, res)
     echo "REPLAY OK bars=", res.bars.len, " signals=", res.signals.len,
-         " frames=", res.frames
+         " events=", res.events.len, " frames=", res.frames
     return 0
   except RecordError as e:
     fail(2, "REPLAY REJECT: " & e.msg)
@@ -68,6 +68,8 @@ proc cmdVerify(runDir: string): int =
     echo "COMMIT=" & r.commitState
   if r.subcheckLine.len > 0:
     echo r.subcheckLine
+  if r.eventsSha256.len > 0:
+    echo "EVENTS=" & r.eventsSha256
   for issue in r.issues:
     stderr.writeLine("  issue: " & issue)
   exitCode(r.verdict)
