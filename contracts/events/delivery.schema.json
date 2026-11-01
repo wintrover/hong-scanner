@@ -1,0 +1,54 @@
+{
+  "x-schema-id": "hong-scanner-event-delivery/1",
+  "title": "Hong Scanner event delivery record (VS-3)",
+  "description": "Operational delivery record for one (event, device) push lifecycle (docs/REPLAY_CONTRACT.md section 13). This record is mutable operational state, separate from the immutable event fact: it is rewritten as attempts progress, while the fact it references never changes. It is never embedded in, merged with, or linked back into the event record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "attempts",
+    "device_id",
+    "event_id",
+    "state",
+    "updated_at"
+  ],
+  "properties": {
+    "attempts": {
+      "description": "Number of delivery attempts made for this (event_id, device_id) pair. 0 while the record is PENDING and nothing has been sent yet.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "device_id": {
+      "description": "Stable identifier of the target device as issued by the scanner's own device registry. Never an FCM or other provider token itself: provider tokens are credentials, they live only in the platform's native storage, and they never enter any record, artifact, or the repository.",
+      "minLength": 1,
+      "type": "string",
+      "x-ref": "scanner device registry identity"
+    },
+    "error_code": {
+      "description": "Provider error code of the last failed attempt, recorded verbatim; the set is open and fail-closed (unknown codes are kept as received, never mapped onto success). Documented examples: UNREGISTERED, SENDER_ID_MISMATCH, QUOTA_EXCEEDED. Present only after a FAILED attempt.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "event_id": {
+      "description": "The event fact this delivery concerns; byte-equal to the fact's event_id (64 lowercase hex digits).",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string",
+      "x-ref": "contracts/events/event.schema.json#/properties/event_id"
+    },
+    "provider_message_id": {
+      "description": "Provider-assigned message id of the accepted attempt, recorded verbatim. Present only after an ACCEPTED attempt.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "state": {
+      "description": "Delivery lifecycle state of this (event_id, device_id) pair. This is the only place delivery state exists; it must never appear in the event fact.",
+      "enum": ["PENDING", "ACCEPTED", "FAILED"],
+      "type": "string"
+    },
+    "updated_at": {
+      "description": "When this delivery state was last rewritten, in the scanner canonical timestamp form YYYY-MM-DDTHH:MM:SS+HH:MM (see hs/sub_input.validIso8601Offset).",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}$",
+      "type": "string"
+    }
+  },
+  "x-separation-rule": "Operational record only: no importance or trust fields (severity, data_quality, direction, rank are fact fields), no verification state (the session-level verify output), no judgment fields. Delivery state never appears in the event fact; delivery can be retried, reordered or dropped without changing a single fact byte."
+}

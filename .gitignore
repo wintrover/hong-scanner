@@ -22,3 +22,4 @@ tests/test_collector_stream_contract
 tools/collector/.venv/
 tools/collector/collector
 tools/collector/__pycache__/
+tests/test_event_contract
