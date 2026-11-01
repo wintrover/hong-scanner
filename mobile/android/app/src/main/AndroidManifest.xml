@@ -1,4 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The app is a read-only client of the local API (127.0.0.1 via
+         adb reverse / emulator alias). The default Flutter template ships
+         INTERNET only in the debug/profile manifests; release needs it
+         explicitly or every API call fails in a signed build. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Notification permission (Android 13+). firebase_messaging merges
+         this transitively; declaring it keeps the permission flow the
+         app implements (requestPermission + ask history) explicit. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="hongscanner"
         android:name="${applicationName}"

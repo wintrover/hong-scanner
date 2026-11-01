@@ -33,6 +33,12 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Release signing: the keystore lives OUTSIDE the repo and key.properties
+# (which references it, with passwords) must never be committed.
+key.properties
+*.keystore
+*.jks
+
 # Symbolication related
 app.*.symbols
 

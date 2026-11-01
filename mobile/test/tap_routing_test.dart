@@ -1,0 +1,125 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:hongscanner/main.dart';
+import 'package:hongscanner/services/fcm_push_service.dart';
+import 'package:hongscanner/services/push_permission.dart';
+import 'package:hongscanner/services/push_service.dart';
+import 'package:hongscanner/state/app_store.dart';
+
+import 'test_kit.dart';
+
+/// Tap-routing tests driven by stub messages. The data payload contract is
+/// {event_id, event_type, severity}; routing keys on event_id only.
+void main() {
+  test('FcmPushService maps a stub RemoteMessage to a PushMessage', () {
+    final message = FcmPushService.messageFromRemote(RemoteMessage(data: {
+      'event_id': evUpEnterId,
+      'event_type': 'CANDIDATE_ENTERED',
+      'severity': 'HIGH',
+    }));
+    expect(message.eventId, evUpEnterId);
+    expect(message.eventType, 'CANDIDATE_ENTERED');
+    expect(message.severity, 'HIGH');
+  });
+
+  test('non-string payload fields degrade to null, never throw', () {
+    final message = FcmPushService.messageFromRemote(
+        RemoteMessage(data: {'event_id': 12345}));
+    expect(message.eventId, isNull);
+    expect(message.eventType, isNull);
+  });
+
+  test('cold start with initial message routes to the event detail',
+      () async {
+    final push = FakeMessagePushService(
+        initial: PushMessage.fromData({
+      'event_id': evUpUpdateId,
+      'event_type': 'CANDIDATE_UPDATED',
+      'severity': 'HIGH',
+    }));
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(store.tabIndex, AppStore.detailTabIndex);
+    expect(store.selectedEventId, evUpUpdateId);
+    expect(store.eventDetail.phase, LoadPhase.loaded);
+    expect(store.eventDetail.value?.event.eventType, 'CANDIDATE_UPDATED');
+  });
+
+  test('background tap message routes; foreground shows banner only',
+      () async {
+    final push = FakeMessagePushService();
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    final banners = <PushMessage>[];
+    await store.bootstrap(onForegroundMessage: banners.add);
+
+    // Background notification tap: routed to detail + fetched.
+    push.tapController.add(PushMessage.fromData({
+      'event_id': evDownEnterId,
+      'event_type': 'CANDIDATE_ENTERED',
+    }));
+    await pumpEventQueue();
+    expect(store.tabIndex, AppStore.detailTabIndex);
+    expect(store.selectedEventId, evDownEnterId);
+
+    // Foreground delivery: in-app banner policy — no tab change, no fetch.
+    push.foregroundController.add(PushMessage.fromData({
+      'event_id': evUpEnterId,
+      'event_type': 'CANDIDATE_ENTERED',
+    }));
+    await pumpEventQueue();
+    expect(banners, hasLength(1));
+    expect(banners.single.eventId, evUpEnterId);
+    expect(store.selectedEventId, evDownEnterId,
+        reason: 'foreground banner must not hijack the current selection');
+    expect(store.tabIndex, AppStore.detailTabIndex);
+  });
+
+  test('payload without a usable event_id is not routed (no invention)',
+      () async {
+    final push = FakeMessagePushService();
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(store.tabIndex, 0, reason: 'no initial message — overview stays');
+    push.tapController
+        .add(PushMessage.fromData({'event_type': 'SESSION_ENDED'}));
+    await pumpEventQueue();
+    expect(store.tabIndex, 0);
+    expect(store.selectedEventId, isNull);
+
+    push.tapController.add(PushMessage.fromData({'event_id': 4}));
+    await pumpEventQueue();
+    expect(store.selectedEventId, isNull);
+  });
+
+  testWidgets(
+      'notification tap from cold start drives the real shell to detail',
+      (WidgetTester tester) async {
+    final push = FakeMessagePushService(
+        initial: PushMessage.fromData({
+      'event_id': evUpEnterId,
+      'event_type': 'CANDIDATE_ENTERED',
+      'severity': 'INFO',
+    }));
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+    await tester.pumpWidget(HongScannerApp(store: store));
+    await tester.pumpAndSettle();
+
+    // The shell's NavigationBar reflects the routed tab and the detail
+    // screen renders the recorded fact.
+    expect(find.text('CANDIDATE_ENTERED · 005930 · UP #1'),
+        findsNothing, reason: 'timeline tab is not the visible stack child');
+    expect(find.text('근거 (evidence_ref)'), findsOneWidget);
+    // The evidence_ref value renders twice on the detail screen by design:
+    // once highlighted in the 근거 card and once verbatim in the recorded
+    // fact table (evidence_ref row).
+    expect(find.text('ka10027:stex_tp=1:sort_tp=1'), findsNWidgets(2));
+    expect(find.text('dev-1 — ACCEPTED'), findsOneWidget);
+  });
+}
