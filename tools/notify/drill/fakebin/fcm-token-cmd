@@ -1,0 +1,6 @@
+#!/bin/sh
+# Drill-only fake token command: stands in for the platform's official
+# client (gcloud auth application-default print-access-token). It prints
+# a FAKE OAuth access token; the value is drill-scoped and exists only
+# in the drill's temp sandbox outside the repository.
+printf '%s\n' "DRILL-FAKE-OAUTH-TOKEN"
