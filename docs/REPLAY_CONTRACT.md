@@ -1,4 +1,4 @@
-# Hong Scanner — Replay Contract (VS-1 baseline, VS-2 targets, v6.2)
+# Hong Scanner — Replay Contract (VS-1 baseline, VS-2/VS-3 targets, v6.3)
 
 This document states the intended VS-1 contract. Tests cover selected cases;
 passing them does not prove every statement or replace review of the actual
@@ -382,3 +382,99 @@ precedent and no official prohibition).
   officially undocumented — the 337-API spec JSON contains zero "ping"
   mentions; the samples and SDK code are the only evidence — so both
   are G2 observation items, never assumed.
+
+## 13. Events (VS-3 contract)
+
+Everything in this section is **target contract** (like §12): no live event
+producer, push transport or mobile client exists yet, and passing VS-2
+proves none of it. The record schemas are the single source of truth:
+`contracts/events/event.schema.json` (the immutable event fact) and
+`contracts/events/delivery.schema.json` (the operational delivery record).
+The event contract suite (`tests/test_event_contract.nim`) covers the
+schemas' structure, vocabularies, the committed fixture, the deterministic
+id rule and the state separation; passing it does not prove an event
+producer exists.
+
+### 13.1 One judgment function
+
+Events are produced by exactly one deterministic function,
+`step(state, record) -> (state', events)`, shared by the live and replay
+paths. Separate live/replay event code is contractually forbidden: a second
+judgment path would be a second definition of the facts. Delivery and
+notification code may filter, order or translate events for transport; it
+may never judge, upgrade, or rewrite them.
+
+### 13.2 Record-first (write-ahead judgment)
+
+Event judgment consumes RECORDED records: `step` sees only records already
+in `input.hcj.jsonl` (§2). The input log precedes judgment (the WAL
+principle), so after a crash the complete event history is reconstructible
+by replaying the log. An event that cannot be derived from the log is not
+a fact.
+
+### 13.3 Single-writer order
+
+Live consumers feed records to `step` strictly in recorder seq order — the
+physical order §2 Rule 1 pins (`seq` 1..N). There is one writer and one
+order, so live and replay see identical input sequences and therefore
+identical events. No consumer may judge from a side channel or reorder
+records before judgment.
+
+### 13.4 Replay and byte-identity
+
+Replay regenerates `events.hcj.jsonl` byte-identically, and `verify`
+byte-compares the live-produced events file against the replayed one
+before any MATCH is reported. The event id binds each fact to its recorded
+position: `event_id` is the sha256 hex of the canonical serialization of
+`(session_id, event_type, rule_id, entity, transition_seq)`, where entity
+is the symbol or `*` and `transition_seq` is the input record seq at which
+the transition was observed (the full rule is `x-event-id-rule` in the
+schema). The seq value itself is never emitted (§2); it enters only this
+one-way digest, and the record carries no position field.
+
+Because ids bind to recorded positions, a §2 Rule 3 diagnostic
+insert/delete (with renumbering) yields a different `events.hcj.jsonl` by
+design; the NO_EFFECT class of §10 is stated over the Core artifacts of
+§1 (`bars.hcj.jsonl`, `signals.hcj.jsonl`). Event byte-identity is defined
+between the live-produced file and the replay of the same input bytes:
+same input bytes, same event bytes.
+
+### 13.5 Determinism boundary
+
+Guaranteed — computation over the same recorded input:
+
+- event generation (which events exist, in what order);
+- event ids (the deterministic rule of §13.4);
+- replay results (byte-identical `events.hcj.jsonl`).
+
+Not guaranteed — everything downstream of the provider boundary:
+
+- FCM (or any provider) arrival time;
+- delivery order across devices or events;
+- the device's display time;
+- whether and when the user read the notification.
+
+None of the unguaranteed outcomes may flow back into a fact, an id, or a
+judgment.
+
+### 13.6 Operational state is never fact state
+
+Three states, three homes, never mixed in one record:
+
+| state | home | mutable |
+|---|---|---|
+| importance / trust (`severity`, `data_quality`) | the event fact | no |
+| verification | the session-level verify output | per session run |
+| delivery (`state`, `attempts`, `error_code`) | delivery records | yes |
+
+A fact never carries `verification_status` or delivery fields; adding them
+would mutate the fact bytes and break replay byte-identity (§13.4). The
+schemas enforce this structurally (`additionalProperties` false); the
+event contract suite rejects both families by name.
+
+### 13.7 Design principles
+
+The six VS-3 design principles govern this contract and are referenced,
+not duplicated: facts live on the server; one judgment logic;
+notifications are transport; mobile is read-only; uncertainty is not
+hidden; existing platform features are leveraged.
