@@ -24,6 +24,7 @@ tools/collector/collector
 tools/collector/__pycache__/
 tools/notify/__pycache__/
 tools/api/__pycache__/
+tools/container/__pycache__/
 tools/notify/drill/fakesite/__pycache__/
 tests/test_event_contract
 tests/test_event_gen_contract
