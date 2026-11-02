@@ -111,14 +111,19 @@ notification re-synthesis are forbidden by design.
 
 ### Firebase handoff checklist (updated for PR-7)
 
-No Firebase project exists yet — the app ships with
-`NoopPushService`, so `FcmPushService` stays fail-closed. When the
-project arrives:
+The Firebase project is wired (steps 1–4 are done): `flutterfire
+configure` generated `lib/firebase_options.dart` and the Gradle plugin
+markers, and `defaultPushService()` composes `const FcmPushService()`.
+`FcmPushService` still fails closed (throws `StateError`) on any device
+where `Firebase.initializeApp` has not run. Remaining live steps:
 
 1. **google-services.json** — place it at
    `android/app/google-services.json` (Firebase console, package
    `com.hongscanner.hongscanner`). Never commit it — the path is
-   gitignored (`android/.gitignore`).
+   gitignored (`android/.gitignore`). CI restores it on every run from
+   the `GOOGLE_SERVICES_JSON` repo secret (`gh secret set
+   GOOGLE_SERVICES_JSON < mobile/android/app/google-services.json`);
+   without the secret the mobile workflow fails closed.
 2. **Gradle plugin** — `flutterfire configure` (step 3) inserts the
    google-services Gradle plugin automatically and idempotently, inside
    the `START/END: FlutterFire Configuration` markers:

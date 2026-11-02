@@ -32,6 +32,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # google-services.json never enters the repository (mobile/README.md
+      # handoff step 1: the path is gitignored). Since the google-services
+      # Gradle plugin now runs on every build, CI restores the file from a
+      # repo secret so the debug APK builds under the same conditions as a
+      # real checkout. A missing secret is a fail-closed error, not a skip.
+      - name: Restore google-services.json (never committed)
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON secret is not set. The google-services Gradle plugin refuses to build without it (fail-closed, see mobile/README.md handoff step 2)."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+          echo "restored $(wc -c < android/app/google-services.json) bytes"
+        working-directory: mobile
       # JDK 21 matches the documented local toolchain (openjdk-21).
       - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
         with:

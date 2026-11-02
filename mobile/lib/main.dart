@@ -1,25 +1,30 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'api/api_client.dart';
+import 'firebase_options.dart';
 import 'screens/app_scope.dart';
 import 'screens/evidence_screen.dart';
 import 'screens/event_detail_screen.dart';
 import 'screens/overview_screen.dart';
 import 'screens/timeline_screen.dart';
-import 'services/noop_push_service.dart';
+import 'services/fcm_push_service.dart';
 import 'services/push_service.dart';
 import 'state/app_store.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const HongScannerApp());
 }
 
-/// Composition point for push wiring. There is no Firebase project yet, so
-/// the app runs with the no-op service; swap to FcmPushService during the
-/// Firebase handoff (see README.md in this directory). The API base URL is
-/// configurable with `--dart-define=HS_API_BASE=…` (default: the Android
-/// emulator's host loopback alias).
-PushService defaultPushService() => const NoopPushService();
+/// Composition point for push wiring — Firebase handoff step 4 (see
+/// README.md in this directory). Fails closed by design: without
+/// google-services.json / initializeApp, FcmPushService throws StateError
+/// instead of reporting success. The API base URL is configurable with
+/// `--dart-define=HS_API_BASE=…` (default: the Android emulator's host
+/// loopback alias).
+PushService defaultPushService() => const FcmPushService();
 
 AppStore defaultAppStore() => AppStore(
       apiClient: ApiClient.fromEnvironment(),
