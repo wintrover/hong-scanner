@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'api/api_client.dart';
 import 'firebase_options.dart';
 import 'screens/app_scope.dart';
+import 'screens/auth_dialog.dart';
 import 'screens/evidence_screen.dart';
 import 'screens/event_detail_screen.dart';
 import 'screens/overview_screen.dart';
@@ -92,6 +93,7 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
       if (store == null) return;
       store.bootstrap(
         onForegroundMessage: _showForegroundBanner,
+        onUnauthorized: () => _reenterCredentials(store),
       );
     });
   }
@@ -132,6 +134,17 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
         duration: const Duration(seconds: 3),
       ),
     );
+  }
+
+  /// The 401 re-entry path the store calls: one credential dialog, and —
+  /// only when the operator submits a pair — persist it to the secure
+  /// store via [AppStore.saveCredentials] and allow the single retry.
+  Future<bool> _reenterCredentials(AppStore store) async {
+    if (!mounted) return false;
+    final credentials = await showCredentialPrompt(context);
+    if (credentials == null) return false;
+    await store.saveCredentials(credentials);
+    return true;
   }
 
   @override

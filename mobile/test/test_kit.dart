@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:hongscanner/api/api_client.dart';
 import 'package:hongscanner/api/api_models.dart';
+import 'package:hongscanner/services/credential_store.dart';
 import 'package:hongscanner/services/noop_push_service.dart';
 import 'package:hongscanner/services/push_permission.dart';
 import 'package:hongscanner/services/push_service.dart';
@@ -212,16 +213,34 @@ String canonicalJson(Object? o) {
 }
 
 class FakeTransport implements HttpTransport {
-  FakeTransport(this.handler);
+  /// Uri-only handler — the shape every pre-existing test closure uses.
+  FakeTransport(Future<TransportResponse> Function(Uri uri) handler)
+      : _handler = ((uri, [headers]) => handler(uri));
 
-  final Future<TransportResponse> Function(Uri uri) handler;
+  /// Header-aware handler for auth tests: the closure sees the exact
+  /// headers the client put on the wire.
+  FakeTransport.withHeaders(
+      Future<TransportResponse> Function(Uri uri,
+              [Map<String, String>? headers])
+          handler)
+      : _handler = handler;
+
+  final Future<TransportResponse> Function(Uri uri,
+      [Map<String, String>? headers]) _handler;
+
   final List<Uri> requests = <Uri>[];
+
+  /// The headers each recorded request carried, index-aligned with
+  /// [requests] — how auth-header assertions observe the wire.
+  final List<Map<String, String>?> headersSeen = <Map<String, String>?>[];
   bool closed = false;
 
   @override
-  Future<TransportResponse> get(Uri uri) async {
+  Future<TransportResponse> get(Uri uri,
+      {Map<String, String>? headers}) async {
     requests.add(uri);
-    return handler(uri);
+    headersSeen.add(headers);
+    return _handler(uri, headers);
   }
 
   @override
@@ -356,11 +375,13 @@ class FakeMessagePushService extends FakePushService
 }
 
 /// Store factory with a zero-cost backoff clock so tests stay synchronous
-/// and fast while still exercising the retry path.
+/// and fast while still exercising the retry path. Credentials default to
+/// the in-memory store so tests never touch a platform channel.
 AppStore makeStore({
   required HttpTransport transport,
   PushService push = const NoopPushService(),
   KeyValueStore? kv,
+  CredentialStore? credentialStore,
   List<Duration>? backoffs,
 }) {
   return AppStore(
@@ -368,6 +389,7 @@ AppStore makeStore({
         baseUrl: 'http://10.0.2.2:8080', transport: transport),
     pushService: push,
     keyValueStore: kv,
+    credentialStore: credentialStore ?? MemoryCredentialStore(),
     delay: (d) async {
       backoffs?.add(d);
     },

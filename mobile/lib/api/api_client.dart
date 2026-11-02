@@ -3,10 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'api_models.dart';
+import 'credentials.dart';
 
 /// Transport abstraction so tests can fake the wire without sockets.
 abstract class HttpTransport {
-  Future<TransportResponse> get(Uri uri);
+  Future<TransportResponse> get(Uri uri, {Map<String, String>? headers});
 
   void close();
 }
@@ -28,9 +29,11 @@ class IoHttpTransport implements HttpTransport {
   bool _closed = false;
 
   @override
-  Future<TransportResponse> get(Uri uri) async {
+  Future<TransportResponse> get(Uri uri,
+      {Map<String, String>? headers}) async {
     if (_closed) throw StateError('transport closed');
     final request = await _client.getUrl(uri);
+    headers?.forEach(request.headers.set);
     final response = await request.close();
     final body = <int>[];
     await for (final chunk in response) {
@@ -89,6 +92,7 @@ class ApiClient {
     required String baseUrl,
     HttpTransport? transport,
     this.timeout = const Duration(seconds: 5),
+    this.authCredentials,
   })  : _transport = transport ?? IoHttpTransport(),
         _ownsTransport = transport == null {
     final base = Uri.tryParse(baseUrl);
@@ -128,6 +132,12 @@ class ApiClient {
   final bool _ownsTransport;
   final Duration timeout;
 
+  /// Current Basic-auth credential pair, or null when the client is used
+  /// without authentication (the local, unexposed API). Sent as
+  /// `Authorization: Basic …` on every request; replaced when the
+  /// operator re-enters credentials after a 401.
+  Credentials? authCredentials;
+
   void close() {
     if (_ownsTransport) _transport.close();
   }
@@ -140,9 +150,20 @@ class ApiClient {
       path: '${_base.path}$path',
       queryParameters: query.isEmpty ? null : query,
     );
+    final credentials = authCredentials;
     TransportResponse response;
     try {
-      response = await _transport.get(uri).timeout(timeout);
+      response = await _transport
+          .get(
+            uri,
+            headers: credentials == null
+                ? null
+                : {
+                    HttpHeaders.authorizationHeader:
+                        credentials.authorizationHeader,
+                  },
+          )
+          .timeout(timeout);
     } on TimeoutException {
       throw ApiClientException(ApiErrorCode.timeout,
           'timed out after ${timeout.inSeconds}s: ${uri.path}');
@@ -154,6 +175,17 @@ class ApiClient {
     } on Exception catch (e) {
       // Unwrapping the transport layers would misclassify honest failures.
       throw ApiClientException(ApiErrorCode.network, 'connection failed: $e');
+    }
+    if (response.statusCode == 401) {
+      // Basic-auth refusal. The 401 body from an authenticating front
+      // (e.g. the Northflank ingress) is not the API's JSON error shape,
+      // so it is classified here, before any JSON decode, and never
+      // masquerades as a format error.
+      throw ApiClientException(
+        ApiErrorCode.http,
+        'HTTP 401: authentication required',
+        statusCode: 401,
+      );
     }
     Object? decoded;
     try {
