@@ -62,7 +62,7 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
 ```json
 {"type":"init","protocol":1,"environment":"demo",
  "rest_domain":"https://mockapi.kiwoom.com",
- "ws_endpoint":"wss://mockapi.kiwoom.com:10000",
+ "ws_endpoint":"wss://mockapi.kiwoom.com:10000/api/dostk/websocket",
  "api_id":"ka10027",
  "rest_params":{"mrkt_tp":"000","trde_qty_cnd":"0000","stk_cnd":"0",
    "crd_cnd":"0","updown_incls":"1","pric_cnd":"0","trde_prica_cnd":"0",
@@ -72,12 +72,22 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
 ```
 
 - `environment`는 이 슬라이스에서 `"demo"`만 허용된다(PH-1). sidecar도
-  이중 검사한다. demo 엔드포인트는 공식 스펙의 모의투자 도메인 원문
-  (`wss://mockapi.kiwoom.com:10000`, `https://mockapi.kiwoom.com`)과 일치해야
-  한다 — 일치하지 않으면 sidecar는 시작을 거부한다.
+  이중 검사한다. demo 엔드포인트 고정 규칙은 아래 `ws_endpoint` 항목이
+  정의한다(`rest_domain`·`ws_endpoint` 정확히 일치해야 시작).
 - `rest_params`는 ka10027 9필드 중 `sort_tp`를 제외한 8필드(방향별로
   core가 `sort_tp` 1/3을 붙여 요청한다). 값 도메인은 vendor_input.nim의
   공식 enum 검증을 통과해야 한다.
+- `ws_endpoint`는 모의 WS 베이스(`wss://mockapi.kiwoom.com:10000`,
+  SDK `DEFAULT_WS_BASE_URLS["demo"]`)에 공식 WS API 경로
+  `/api/dostk/websocket`(kwcli `api_commands.csv` ka10171~73의 WS 경로,
+  SDK `ws_client.connect`는 `uri = base + api_url`로 합성)를 붙인
+  **실제 접속 URI 전체**다. 2026-11-02 14:3x KST 실측: 베이스만(루트
+  `/`)으로 보낸 opening handshake는 서버가 무응답(TimeoutError)이고,
+  `/api/dostk/websocket` 경로로 보내면 업그레이드가 완료된다(TCP·TLS
+  1.3·Kiwoom EV 인증서는 양쪽 다 정상). 루트 무응답은 공식 문서에
+  없는 관측 사실이다(경로 조합 자체는 공식 클라이언트 소스 근거).
+  `rest_domain`(`https://mockapi.kiwoom.com`)과 함께 — 정확히 이 값이
+  아니면 sidecar는 시작을 거부한다.
 - `page_cap`=10(공식 예제 MAX_PAGES), `repoll_seconds`=300(§5 승인값),
   `drain_seconds`=10(§5), `ack_timeout_seconds`=10(승인된 drain 값과 같은
   "프로토콜 1단계 정적 한계"로 선언, §5 표에 명시된 값에서 유도 —
@@ -313,7 +323,7 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
  "subscription_caps":{"per_direction":100,"total":200},
  "collector":{"schema":"hong-scanner-collector-config/1",
    "api_id":"ka10027","rest_domain":"https://mockapi.kiwoom.com",
-   "ws_endpoint":"wss://mockapi.kiwoom.com:10000","profile":"<alias>"},
+   "ws_endpoint":"wss://mockapi.kiwoom.com:10000/api/dostk/websocket","profile":"<alias>"},
  "params":{...}, "session_date":"..."}
 ```
 

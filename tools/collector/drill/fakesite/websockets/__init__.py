@@ -132,7 +132,7 @@ async def connect(uri, ping_interval=None, **kwargs):
     """The single entry the sidecar uses (sidecar.py connect_loop).
     Anything other than the official demo endpoint is a drill setup bug
     (README §2.1: demo 엔드포인트 고정)."""
-    expected = "wss://mockapi.kiwoom.com:10000"
+    expected = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
     if uri != expected:
         raise AssertionError("drill fake: unexpected WS endpoint %r" % uri)
     return FakeConnection(uri, ping_interval, fx.wirelog())

@@ -42,7 +42,7 @@ type
     environment*: string       ## "demo" only (PH-1)
     apiId*: string             ## ka10027
     restDomain*: string        ## https://mockapi.kiwoom.com (spec 모의 도메인)
-    wsEndpoint*: string        ## wss://mockapi.kiwoom.com:10000 (spec 원문)
+    wsEndpoint*: string        ## demo WS base + /api/dostk/websocket (SDK ws_client)
     mrktTp*, trdeQtyCnd*, stkCnd*, crdCnd*: string
     updownIncls*, pricCnd*, trdePricaCnd*, stexTp*: string
     pageCap*: int              ## approved PH-1 value 10
@@ -123,7 +123,7 @@ proc cerr(msg: string): ref CollectorError =
 
 const
   demoRestDomain* = "https://mockapi.kiwoom.com"
-  demoWsEndpoint* = "wss://mockapi.kiwoom.com:10000"
+  demoWsEndpoint* = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
   approvedWatchdog* = "15:40:00+09:00"
 
 proc initCollectorConfig*(sessionDate, environment, profile: string;

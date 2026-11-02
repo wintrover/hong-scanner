@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 PROTOCOL = 1
 KST = timezone(timedelta(hours=9))
 DEMO_REST_DOMAIN = "https://mockapi.kiwoom.com"
-DEMO_WS_ENDPOINT = "wss://mockapi.kiwoom.com:10000"
+DEMO_WS_ENDPOINT = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
 REST_PATH = "/api/dostk/rkinfo"
 TOKEN_BUFFER_SECONDS = 600
 # The auth-class LOGIN ack codes (README §2.2): one refresh + one retry.

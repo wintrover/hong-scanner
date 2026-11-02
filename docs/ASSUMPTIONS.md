@@ -117,7 +117,17 @@ still requires G2 credentials.
   codes: 8104 "모의투자에서 지원하지 않는 API 입니다.", 8030/8031
   투자구분(실전/모의) mismatch. Domains: mock REST
   `https://mockapi.kiwoom.com`; mock WS `wss://mockapi.kiwoom.com:10000`
-  (SDK `DEFAULT_WS_BASE_URLS["demo"]`). "실제 투자와 모의투자 App Key를
+  (SDK `DEFAULT_WS_BASE_URLS["demo"]`). WS connect URI는 베이스에 공식
+  WS API 경로를 붙인 것이다: SDK `ws_client.connect`가
+  `uri = base + api_url`로 합성하고, kwcli `api_commands.csv`의 WS
+  기반 명령(ka10171~73) 경로가 `/api/dostk/websocket`이라
+  `wss://mockapi.kiwoom.com:10000/api/dostk/websocket`이 실제 접속
+  URI다. 2026-11-02 14:3x KST(월 정규장 중) 실측: 루트(`/`)로 보낸
+  opening handshake는 TCP·TLS 1.3(Kiwoom EV 인증서) 완료 후에도 서버
+  무응답(TimeoutError), `/api/dostk/websocket` 경로는 업그레이드
+  완료 — 루트 무응답 자체는 공식 문서에 없는 관측 사실이고 2026-10-31
+  금·토 프로브 타임아웃의 원인(경로 없이 프로브했음). "실제 투자와
+  모의투자 App Key를
   별도로 관리합니다." Mock rate limit: TR 1초 1회 per account/토큰
   (notice #49). The 모의투자 운영규정 text itself is UNVERIFIED (SPA, not
   statically retrievable).
