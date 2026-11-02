@@ -21,6 +21,13 @@ or no connection. No real market data enters the app or the repository
 - `lib/api/api_client.dart` · `lib/api/api_models.dart` — typed GET-only
   client matching `tools/api/README.md` (identifier validation mirrors
   the server's; `null` = "no record" is preserved, never coerced to 0)
+- `lib/api/credentials.dart` — the Basic-auth credential pair value type
+  (header generation; toString never carries either half)
+- `lib/services/credential_store.dart` — `CredentialStore` abstraction:
+  `SecureCredentialStore` (flutter_secure_storage, Android Keystore) and
+  the in-memory fake for tests
+- `lib/screens/auth_dialog.dart` — the one re-entry dialog for API
+  credentials (shown on 401)
 - `lib/services/push_service.dart` — `PushService` +
   `PushMessageSource` abstractions, `PushMessage` payload type
 - `lib/services/noop_push_service.dart` — `NoopPushService` (default;
@@ -37,7 +44,10 @@ or no connection. No real market data enters the app or the repository
   3.47.9 stable / Dart 3.13.7 (`~/sdk/flutter`)
 - Android `minSdk 24` — set in `android/app/build.gradle.kts`
 - Dependencies: `firebase_core`, `firebase_messaging: ^17.0.1`,
-  `shared_preferences` (ask-history persistence only)
+  `shared_preferences` (ask-history persistence only),
+  `flutter_secure_storage: ^11.2.0` (API Basic-auth credentials only —
+  Android Keystore-backed storage; deliberately NOT routed through
+  `shared_preferences`, which stays the ask-history store)
 
 ## Running against the local API
 
@@ -53,8 +63,33 @@ flutter run --dart-define=HS_API_BASE=http://10.0.2.2:8080   # Android emulator
   This is the `HS_API_BASE` default.
 - Physical device over USB: `adb reverse tcp:8080 tcp:8080`, then
   `--dart-define=HS_API_BASE=http://127.0.0.1:8080`.
-- Anything beyond that (remote exposure, TLS, WireGuard fronting) is
-  explicitly not built — a separate plan would be required first.
+- `https://` origins work as-is: dart:io HttpClient performs standard
+  certificate validation (no `badCertificateCallback` override — the
+  default trust evaluation stays untouched). Plain `http://` local
+  development paths behave exactly as before.
+
+## Basic Auth & HTTPS (Northflank front)
+
+The API server still binds loopback only (`tools/api/README.md` §7);
+remote reachability comes from a deployment front (Northflank HTTPS with
+Basic Auth), which the app supports as follows:
+
+- **Every API request** carries `Authorization: Basic
+  <base64(user:password)>` once a credential pair is armed; with no pair
+  stored, requests go out header-less and behave as before.
+- **Storage**: the pair is entered once via the re-entry dialog and kept
+  only in flutter_secure_storage (Android: Keystore-wrapped RSA-OAEP key,
+  AES-GCM data). There is no `shared_preferences` path for credentials,
+  and the values are never logged (`Credentials.toString` masks them).
+- **401 handling**: the first 401 in a resync pass opens the credential
+  dialog (whether the stored pair was refused or never existed). A
+  submitted pair is saved and the pass retries **exactly once**;
+  cancelling — or a failing prompt/storage write — leaves the visible
+  "인증 필요 (401)" error states with no further auth retries. The
+  existing bounded resync backoff is unchanged.
+- The stored pair is used for whatever origin `HS_API_BASE` points at;
+  pointing the app at a different (unauthenticated) origin, such as the
+  local loopback API, still works — no 401, no dialog, no header needed.
 
 ## Screens — recorded facts only
 
