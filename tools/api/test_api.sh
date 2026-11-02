@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 ## read-only API contract suite (tools/api/README.md): unittest with a
-## real serve.py process on 127.0.0.1 on an ephemeral port, synthetic
+## real serve.py process on loopback (127.0.0.1 default, one --bind
+## case on 127.0.0.2) on an ephemeral port, synthetic
 ## fixture run directories and ledgers in a mktemp sandbox — loopback
 ## only, no market data, no credentials. The suite reaps every server
 ## it starts and asserts a clean SIGTERM exit.
