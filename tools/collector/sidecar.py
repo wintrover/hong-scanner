@@ -230,7 +230,8 @@ class TokenStore:
 class Sidecar:
     """One collector session's communication state machine."""
 
-    def __init__(self, cfg, repoll=300, drain=10, ack_timeout=10):
+    def __init__(self, cfg, repoll=300, drain=10, ack_timeout=10,
+                 rest_min_interval=1.0):
         self.cfg = cfg
         self.ws_endpoint = cfg["ws_endpoint"]
         self.rest_domain = cfg["rest_domain"]
@@ -242,6 +243,15 @@ class Sidecar:
         self.repoll = repoll
         self.drain = drain
         self.ack_timeout = ack_timeout
+        # The mock vendor limit is one TR per second per account/token
+        # (notice #49, ASSUMPTIONS "Vendor facts"; observed live
+        # 2026-11-02: back-to-back page 2 -> HTTP 429 "허용된 요청
+        # 개수를 초과하였습니다 ... 유량=1, API ID=ka10027"). All REST
+        # traffic is spaced by this much — 1.0 s is the approved live
+        # value, tests may shrink it.
+        self.rest_min_interval = rest_min_interval
+        self._rest_pace_lock = threading.Lock()
+        self._last_rest_monotonic = 0.0
         self.watchdog_text = cfg["watchdog"]
         self.token = None
         self.token_type = "Bearer"
@@ -469,11 +479,24 @@ class Sidecar:
 
     # ------------------------------------------------------------ REST
 
+    def _pace_rest(self):
+        """Serialize and space REST requests by rest_min_interval (the
+        vendor's one-TR-per-second limit) so consecutive pages never
+        race into the 429. Runs on the executor thread, off the loop."""
+        with self._rest_pace_lock:
+            now = time.monotonic()
+            wait = (self._last_rest_monotonic + self.rest_min_interval
+                    - now)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_rest_monotonic = time.monotonic()
+
     def do_rest(self, direction, cont_yn, next_key):
         """One ka10027 page request on the caller's executor thread.
         The response is reported raw — status, response cont-yn/next-key
         headers, body bytes hex — whatever the status (README §2.4). A
         transport failure (no HTTP response at all) is error what=rest."""
+        self._pace_rest()
         body = dict(self.rest_params)
         body["sort_tp"] = SORT_TP[direction]
         data = json.dumps(body, ensure_ascii=False,

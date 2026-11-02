@@ -129,7 +129,10 @@ still requires G2 credentials.
   금·토 프로브 타임아웃의 원인(경로 없이 프로브했음). "실제 투자와
   모의투자 App Key를
   별도로 관리합니다." Mock rate limit: TR 1초 1회 per account/토큰
-  (notice #49). The 모의투자 운영규정 text itself is UNVERIFIED (SPA, not
+  (notice #49) — 2026-11-02 라이브 실측 확인: 페이지 2를 1초 내 재요청하면
+  HTTP 429 `"허용된 요청 개수를 초과하였습니다[1700: …유량=1,
+  API ID=ka10027]"` + return_code 5, 요청 간격 1초로 두면 통과(창 해석은
+  무문서 — 1초 간격이 문서화된 상한의 준수). The 모의투자 운영규정 text itself is UNVERIFIED (SPA, not
   statically retrievable).
 - Durability evidence (man-pages, POSIX.1-2024, SQLite, LevelDB,
   PostgreSQL): fsync(2) flushes file data and metadata, but "Calling

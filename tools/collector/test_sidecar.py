@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+import time
 import types
 import unittest
 import urllib.error
@@ -198,7 +199,8 @@ class Harness:
     and a fake wire, and asserts on the emitted event lines."""
 
     def __init__(self, testcase, ack_timeout=0.5, drain=0.2, repoll=3600,
-                 watchdog="23:59:59+09:00", token=TOKEN):
+                 watchdog="23:59:59+09:00", token=TOKEN,
+                 rest_min_interval=0.0):
         self.testcase = testcase
         self.stdin = FakeStdin()
         self.stdout = Capture()
@@ -208,7 +210,8 @@ class Harness:
         cfg["watchdog"] = watchdog
         self.cfg = cfg
         self.sc = sidecar.Sidecar(cfg, repoll=repoll, drain=drain,
-                                  ack_timeout=ack_timeout)
+                                  ack_timeout=ack_timeout,
+                                  rest_min_interval=rest_min_interval)
         self.sc.token = token
         self.sc.token_type = TOKEN_TYPE
         self.task = None
@@ -703,6 +706,50 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["sort_tp"], "3")
         self.assertEqual(captured["req"].headers.get("Cont-yn"), "Y")
         self.assertEqual(captured["req"].headers.get("Next-key"), "k1")
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_rest_requests_are_spaced_by_the_vendor_limit(self):
+        """README §2.4: consecutive REST sends are spaced by
+        rest_min_interval — the mock vendor's one-TR-per-second limit
+        (observed live 2026-11-02: back-to-back page 2 -> 429)."""
+        h = self.harness(rest_min_interval=0.25)
+        await h.start()
+        stamps = []
+
+        class FakeResp:
+            status = 200
+            headers = {}
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            stamps.append(time.monotonic())
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="rest_req", direction="up", page=1,
+                   cont_yn="", next_key="")
+            await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest" for e in evs),
+                "the first rest event")
+            h.send(type="rest_req", direction="up", page=2,
+                   cont_yn="Y", next_key="k1")
+            await h.wait_for(
+                lambda evs: len([e for e in evs
+                                 if e.get("ev") == "rest"]) >= 2,
+                "the second rest event")
+
+        self.assertEqual(len(stamps), 2)
+        self.assertGreaterEqual(stamps[1] - stamps[0], 0.23,
+                                "page 2 raced page 1 inside the vendor's "
+                                "one-request-per-second limit")
         self.assertEqual(await h.stop_and_join(), 0)
 
     async def test_rest_http_error_is_still_a_response(self):
