@@ -231,7 +231,7 @@ class Sidecar:
     """One collector session's communication state machine."""
 
     def __init__(self, cfg, repoll=300, drain=10, ack_timeout=10,
-                 rest_min_interval=1.0):
+                 rest_min_interval=1.5):
         self.cfg = cfg
         self.ws_endpoint = cfg["ws_endpoint"]
         self.rest_domain = cfg["rest_domain"]
@@ -246,9 +246,12 @@ class Sidecar:
         # The mock vendor limit is one TR per second per account/token
         # (notice #49, ASSUMPTIONS "Vendor facts"; observed live
         # 2026-11-02: back-to-back page 2 -> HTTP 429 "허용된 요청
-        # 개수를 초과하였습니다 ... 유량=1, API ID=ka10027"). All REST
-        # traffic is spaced by this much — 1.0 s is the approved live
-        # value, tests may shrink it.
+        # 개수를 초과하였습니다 ... 유량=1, API ID=ka10027" — and once
+        # more at exactly 1.0 s client spacing, while a 7-page chain
+        # paced the same way passed: arrival jitter can compress the
+        # gap below the server's window). All REST traffic is spaced by
+        # this much — 1.5 s (the documented 1 s ceiling plus jitter
+        # margin) is the approved live value, tests may shrink it.
         self.rest_min_interval = rest_min_interval
         self._rest_pace_lock = threading.Lock()
         self._last_rest_monotonic = 0.0
