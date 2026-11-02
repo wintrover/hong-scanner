@@ -30,6 +30,15 @@ AGENTS.md §0.3 vendor-fact rule — the claims below are the vendor's:
   onto success and never guessed retryable (delivery.schema.json
   error_code: the set is open and kept verbatim).
 - Payload limit: 4096 bytes for most messages, keys and values included.
+- Android priority: the message always carries android.priority
+  explicitly ("high" for HIGH/CRITICAL, "normal" for INFO). The
+  vendor's own pages disagree on the unset default: the REST v1
+  reference documents HIGH as "Default priority for notification
+  messages" while the guide says "Normal priority. This is the default
+  priority for data and notification messages" (both pages updated
+  2026-10-28, consulted 2026-11-02). The effective unset priority is
+  therefore not provable from official prose; README §6 records the
+  conflict and claims neither default.
 
 accepted != delivered: an HTTP 200 only proves FCM accepted the message
 for delivery. Arrival time, ordering, display and user reads are outside
@@ -330,7 +339,11 @@ class TokenSource:
 def build_message(event, fcm_token):
     """The notification+data message for one event -> one device
     (README §6). Minimal title/body; the data payload carries the ids.
-    The FCM registration token is inside the request body only."""
+    android.priority is always explicit — HIGH/CRITICAL send "high",
+    INFO sends "normal" — because the vendor's own pages disagree on
+    the unset default (README §6 records the conflict verbatim); an
+    explicit value is the only sure path. The FCM registration token
+    is inside the request body only."""
     title = "Hong Scanner %s" % event["severity"]
     body = event["event_type"]
     if "symbol" in event:
@@ -339,6 +352,9 @@ def build_message(event, fcm_token):
         "message": {
             "token": fcm_token,
             "notification": {"title": title, "body": body},
+            "android": {"priority": "high" if
+                        event["severity"] in ("HIGH", "CRITICAL")
+                        else "normal"},
             "data": {
                 "event_id": event["event_id"],
                 "event_type": event["event_type"],

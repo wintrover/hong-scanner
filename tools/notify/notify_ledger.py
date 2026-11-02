@@ -357,12 +357,13 @@ class EventLedger:
 
     def ingest_source(self, source_path):
         """Append the facts of a producer's events file (PR-4 output)
-        byte-verbatim. The whole source validates BEFORE anything is
-        appended (fail-closed, no partial append of an invalid file);
-        byte-identical duplicates of an already-present event_id are an
-        idempotent skip, and the same event_id with different bytes is
-        refused: the fact is immutable, a divergent duplicate would be a
-        mutation attempt. Returns counters."""
+        byte-verbatim. The whole source validates and diffs against
+        the ledger BEFORE anything is appended (fail-closed, no
+        partial append of an invalid or divergent source);
+        byte-identical duplicates of an already-present event_id are
+        an idempotent skip, and the same event_id with different bytes
+        is refused: the fact is immutable, a divergent duplicate would
+        be a mutation attempt. Returns counters."""
         try:
             with open(source_path, "rb") as f:
                 source = f.read()
@@ -375,34 +376,63 @@ class EventLedger:
             # A missing final LF is tolerated: the bytes are preserved,
             # the LF is added on append (README §3).
             lines.append(trailing)
+        new_lines, duplicated = self._plan_ingest(lines, source_path)
+        for line in new_lines:
+            self._appender.append(line + b"\n")
+        return {"appended": len(new_lines), "duplicate": duplicated,
+                "total": len(lines)}
+
+    def ingest_lines(self, lines, origin="<watch batch>"):
+        """Batch ingest for the resident worker (README §1): raw line
+        bytes whose LF termination in the source the caller has
+        already confirmed (the tail extraction never hands over a
+        partial line; the LF is added on append). The whole batch
+        validates and diffs against the ledger BEFORE anything is
+        appended — all-or-nothing: an invalid, empty or divergent line
+        leaves the ledger untouched and the caller's byte offset
+        unadvanced. Byte-identical duplicates of a present event_id
+        are an idempotent skip; the same event_id with different bytes
+        is refused (the fact is immutable). The validation and dedup
+        path is the exact code of ingest_source (_plan_ingest).
+        Returns the same counters."""
+        new_lines, duplicated = self._plan_ingest(list(lines), origin)
+        for line in new_lines:
+            self._appender.append(line + b"\n")
+        return {"appended": len(new_lines), "duplicate": duplicated,
+                "total": len(lines)}
+
+    def _plan_ingest(self, lines, origin):
+        """The one validation/dedup path both ingest entries share:
+        validate every line, diff the batch against the ledger, and
+        return (new_lines, duplicated_count) WITHOUT appending
+        anything. Raises LedgerError on an empty line, an invalid
+        record, or an event_id that already exists with different
+        bytes (against the ledger or within the batch)."""
         staged = []
-        seen = {}
         for i, line in enumerate(lines, start=1):
             if not line:
-                raise LedgerError("source %s line %d is empty"
-                                  % (source_path, i))
-            obj = parse_line(line, validate_event, source_path, i)
+                raise LedgerError("%s line %d is empty" % (origin, i))
+            obj = parse_line(line, validate_event, origin, i)
             staged.append((obj["event_id"], line))
-            seen[obj["event_id"]] = line
 
         existing = {}
         for raw, obj in self.read_records(strict=False)[0]:
             existing[obj["event_id"]] = raw
 
-        appended = duplicated = 0
+        new_lines = []
+        duplicated = 0
         for event_id, line in staged:
             if event_id in existing:
                 if existing[event_id] != line:
                     raise LedgerError(
-                        "event_id %s already exists with different bytes; "
-                        "the fact is immutable (README §3)" % event_id)
+                        "event_id %s already exists with different "
+                        "bytes; the fact is immutable (README §3)"
+                        % event_id)
                 duplicated += 1
                 continue
-            self._appender.append(line + b"\n")
+            new_lines.append(line)
             existing[event_id] = line
-            appended += 1
-        return {"appended": appended, "duplicate": duplicated,
-                "total": len(staged)}
+        return new_lines, duplicated
 
     def events(self, strict=True):
         """The facts in ledger order, as objects only."""

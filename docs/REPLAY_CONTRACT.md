@@ -422,6 +422,13 @@ principle), so after a crash the complete event history is reconstructible
 by replaying the log. An event that cannot be derived from the log is not
 a fact.
 
+Record-first is a durability ordering, not only a write ordering: before
+the live collector appends an event to the events journal — the file a
+notification consumer reads — it fsyncs the input log, so a published
+event never outruns the durability of the recorded input it was judged
+from. An event whose evidence cannot be made durable is not published;
+the session is preserved and ends INCOMPLETE.
+
 ### 13.3 Single-writer order
 
 Live consumers feed records to `step` strictly in recorder seq order — the
