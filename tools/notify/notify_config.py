@@ -14,6 +14,9 @@ Fail-closed: a missing, non-JSON or non-conforming config is a ConfigError
 (exit 2 in the CLIs), never a default. Values below the vendor minimum
 (retry_min_seconds) are not silently clamped: the live default IS the
 vendor minimum and only synthetic drills/tests override it, on record.
+The resident worker's tick interval (watch_poll_seconds, README §1/§7)
+defaults to 1.0 and is bounded 0 < x <= 60: a zero or negative poll
+would spin, an unbounded one would stall delivery.
 """
 
 import json
@@ -33,6 +36,8 @@ COMMAND_PATH_KEYS = {
     "register": {"registry_path", "register_bearer_file"},
 }
 INT_DEFAULTS = {"retry_min_seconds": 60, "backoff_cap_seconds": 900}
+FLOAT_DEFAULTS = {"watch_poll_seconds": 1.0}
+WATCH_POLL_MAX = 60
 
 
 class ConfigError(Exception):
@@ -114,4 +119,13 @@ def load_config(path, for_command):
            value < 0:
             raise ConfigError("%s must be a non-negative integer" % key)
         cfg[key] = value
+
+    for key, default in FLOAT_DEFAULTS.items():
+        value = cfg.get(key, default)
+        if isinstance(value, bool) or \
+           not isinstance(value, (int, float)) or \
+           not 0 < value <= WATCH_POLL_MAX:
+            raise ConfigError("%s must be a number with 0 < %s <= %d"
+                              % (key, key, WATCH_POLL_MAX))
+        cfg[key] = float(value)
     return cfg

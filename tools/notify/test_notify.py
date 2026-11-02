@@ -15,13 +15,18 @@ bootstrap, no external dependency.
 """
 
 import base64
+import contextlib
 import hashlib
+import io
 import json
 import os
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 
@@ -270,9 +275,11 @@ class Base(unittest.TestCase):
         finally:
             registry.close()
 
-    def dispatcher(self, cfg, transport):
+    def dispatcher(self, cfg, transport, resident=False):
         """A Dispatcher with a controllable clock: the sleep call
-        advances the fake clock so backoffs are instant and exact."""
+        advances the fake clock so backoffs are instant and exact.
+        resident=True builds the watch worker (the event ledger is
+        opened with its writer lock)."""
         clock = {"now": 1_000_000.0}
 
         class Ctx(notify_dispatcher.Dispatcher):
@@ -282,9 +289,29 @@ class Base(unittest.TestCase):
             cfg, opener=transport,
             clock=lambda: clock["now"],
             sleeper=lambda seconds: clock.__setitem__(
-                "now", clock["now"] + seconds))
+                "now", clock["now"] + seconds),
+            resident=resident)
         dispatcher._clock_state = clock
         return dispatcher
+
+    def ledger_lines(self, cfg):
+        path = cfg["ledger_path"]
+        if not os.path.exists(path):
+            return []
+        with open(path, "rb") as f:
+            return f.read().split(b"\n")[:-1]
+
+    def event_line(self, **kwargs):
+        return json.dumps(make_event(**kwargs), ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")
+
+    def _events_path(self):
+        return os.path.join(self.tmp, "events.hcj.jsonl")
+
+    def _append_lines(self, path, lines):
+        with open(path, "ab") as f:
+            for line in lines:
+                f.write(line + b"\n")
 
     def delivery_records(self, cfg):
         path = cfg["delivery_path"]
@@ -337,6 +364,22 @@ class TestConfig(Base):
             json.dump(cfg, f)
         with self.assertRaises(notify_config.ConfigError):
             notify_config.load_config(path, "dispatch")
+
+    def test_watch_poll_seconds_defaults_and_bounds(self):
+        path, cfg = self.config()
+        loaded = notify_config.load_config(path, "dispatch")
+        # Default: one-second ticks.
+        self.assertEqual(loaded["watch_poll_seconds"], 1.0)
+        for bad in (0, -1, 61, 60.5, "1", True, None):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(dict(cfg, watch_poll_seconds=bad), f)
+            with self.assertRaises(notify_config.ConfigError):
+                notify_config.load_config(path, "dispatch")
+        for good, expected in ((0.5, 0.5), (60, 60.0), (2, 2.0)):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(dict(cfg, watch_poll_seconds=good), f)
+            loaded = notify_config.load_config(path, "dispatch")
+            self.assertEqual(loaded["watch_poll_seconds"], expected)
 
 
 # ------------------------------------------------- schema validation
@@ -560,6 +603,50 @@ class TestEventLedger(Base):
                                   "--source", source])
         self.assertEqual(rc, 0)  # idempotent re-ingest stays success
 
+    def test_ingest_lines_batch_is_all_or_nothing_and_idempotent(self):
+        # The resident worker's entry point: same validation/dedup path
+        # as ingest_source, but the batch was already LF-terminated in
+        # the source and NOTHING is appended unless every line is good.
+        _, cfg = self.config()
+        ledger = notify_ledger.EventLedger(cfg["ledger_path"], lock=True)
+        try:
+            a = json.dumps(make_event(seq=1), separators=(",", ":")
+                           ).encode("utf-8")
+            b = json.dumps(make_event(seq=2), separators=(",", ":")
+                           ).encode("utf-8")
+            stats = ledger.ingest_lines([a, b])
+            self.assertEqual(stats, {"appended": 2, "duplicate": 0,
+                                     "total": 2})
+            after_first = open(cfg["ledger_path"], "rb").read()
+            self.assertEqual(after_first, a + b"\n" + b + b"\n")
+            # Byte-identical re-ingest: an idempotent skip, no change.
+            stats = ledger.ingest_lines([a, b])
+            self.assertEqual(stats, {"appended": 0, "duplicate": 2,
+                                     "total": 2})
+            self.assertEqual(open(cfg["ledger_path"], "rb").read(),
+                             after_first)
+            # A divergent duplicate is refused, nothing appended.
+            divergent = json.dumps(dict(make_event(seq=1),
+                                        severity="CRITICAL"),
+                                   separators=(",", ":")).encode("utf-8")
+            with self.assertRaises(notify_ledger.LedgerError):
+                ledger.ingest_lines([divergent])
+            self.assertEqual(open(cfg["ledger_path"], "rb").read(),
+                             after_first)
+            # An invalid line after a valid one: the WHOLE batch is
+            # refused (no partial append), unlike a per-line writer.
+            with self.assertRaises(notify_ledger.LedgerError):
+                ledger.ingest_lines([a, b"{}"])
+            self.assertEqual(open(cfg["ledger_path"], "rb").read(),
+                             after_first)
+            # An empty line is a contract violation too.
+            with self.assertRaises(notify_ledger.LedgerError):
+                ledger.ingest_lines([a, b""])
+            self.assertEqual(open(cfg["ledger_path"], "rb").read(),
+                             after_first)
+        finally:
+            ledger.close()
+
 
 # ---------------------------------------------------------- registries
 
@@ -691,6 +778,24 @@ class TestTransport(Base):
             "event_id": make_event()["event_id"],
             "event_type": "CANDIDATE_ENTERED",
             "severity": "INFO"})
+
+    def test_android_priority_is_explicit_and_severity_mapped(self):
+        # The vendor's pages disagree on the unset default (README §6),
+        # so the mapping is always explicit: HIGH/CRITICAL -> high,
+        # INFO -> normal.
+        message = notify_fcm.build_message(make_event(), FCM_TOKEN)
+        self.assertEqual(message["message"]["android"]["priority"],
+                         "normal")
+        for severity in ("HIGH", "CRITICAL"):
+            message = notify_fcm.build_message(
+                make_event(severity=severity), FCM_TOKEN)
+            self.assertEqual(message["message"]["android"]["priority"],
+                             "high")
+        # The explicit field is inside the wire payload the guard
+        # measures: still far below the vendor limit.
+        size = len(json.dumps(message, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8"))
+        self.assertLessEqual(size, notify_fcm.PAYLOAD_LIMIT_BYTES)
 
     def test_payload_limit_is_enforced(self):
         # The guard runs on the wire payload; an oversized token forces
@@ -1169,6 +1274,315 @@ class TestRegister(Base):
         self.assertNotIn(FCM_TOKEN, out.getvalue())
         self.assertIn(notify_ledger.mask_secret(FCM_TOKEN),
                       out.getvalue())
+
+
+# --------------------------------------------------- resident watch
+
+
+def _wait_for_line(pattern, stream, timeout=15.0):
+    """Read a subprocess pipe until a line containing `pattern`
+    arrives; returns the lines read so far. No timeout means a stuck
+    worker, which fails the test instead of hanging the suite."""
+    end = time.monotonic() + timeout
+    buf = b""
+    lines = []
+    fd = stream.fileno()
+    while time.monotonic() < end:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            continue
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            raw, buf = buf.split(b"\n", 1)
+            lines.append(raw.decode("utf-8", "replace"))
+            if pattern in lines[-1]:
+                return lines
+    raise AssertionError("timed out waiting for %r; got so far: %r"
+                         % (pattern, lines))
+
+
+class TestWatchDispatcher(Base):
+    """The resident watch tick contract (README §1/§5): byte-offset
+    tailing with LF as the commit marker, all-or-nothing batch ingest,
+    (st_dev, st_ino) rescan, and retry deferral BETWEEN ticks."""
+
+    def test_partial_tail_is_never_consumed_until_its_lf_arrives(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        line = self.event_line(seq=1)
+        with open(events_path, "wb") as f:
+            f.write(line)  # complete record bytes, NOT yet LF-terminated
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, 0,
+                                                     None)
+            # A partial tail is not committed: nothing consumed, the
+            # offset unadvanced, and it is not an error.
+            self.assertEqual(offset, 0)
+            self.assertEqual(self.ledger_lines(cfg), [])
+            self.assertIsNotNone(identity)
+            self.assertNotIn("watch tick", out.getvalue())
+            self.assertIn("watch open", out.getvalue())
+            # The producer commits the record: only now is it consumed.
+            with open(events_path, "ab") as f:
+                f.write(b"\n")
+            with contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, offset,
+                                                     identity)
+            self.assertEqual(offset, len(line) + 1)
+            self.assertEqual(self.ledger_lines(cfg), [line])
+            self.assertIn("watch tick new=1 ingested=1 appended=1 "
+                          "dup=0", out.getvalue())
+        finally:
+            worker.close()
+
+    def test_full_rescan_of_identical_lines_is_idempotent(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        line = self.event_line(seq=1)
+        self._append_lines(events_path, [line])
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            offset, identity = worker.watch_tick(events_path, 0, None)
+            self.assertEqual(offset, len(line) + 1)
+            before = open(cfg["ledger_path"], "rb").read()
+            # A crash-restart style rescan: same file identity, the
+            # offset back at 0 — the same bytes are re-fed.
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, 0,
+                                                     identity)
+            self.assertEqual(offset, len(line) + 1)
+            self.assertEqual(open(cfg["ledger_path"], "rb").read(),
+                             before)  # byte-identical, present once
+            self.assertIn("appended=0", out.getvalue())
+            self.assertIn("dup=1", out.getvalue())
+        finally:
+            worker.close()
+
+    def test_inode_change_triggers_full_rescan(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        a = self.event_line(seq=1)
+        b = self.event_line(seq=2)
+        self._append_lines(events_path, [a])
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            offset, identity = worker.watch_tick(events_path, 0, None)
+            self.assertEqual(self.ledger_lines(cfg), [a])
+            # The producer recreates the file (new st_dev/st_ino pair)
+            # holding the old fact and a new one: the replacement file
+            # is created while the old one still exists, so its inode
+            # is provably different (an unlink+create could be handed
+            # the recycled inode back).
+            replacement = events_path + ".recreated"
+            self._append_lines(replacement, [a, b])
+            os.replace(replacement, events_path)
+            st = os.stat(events_path)
+            self.assertNotEqual((st.st_dev, st.st_ino), identity)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                offset, _ = worker.watch_tick(events_path, offset,
+                                              identity)
+            # Full rescan from 0: the old fact is a byte-identical
+            # idempotent skip, only the new fact is appended.
+            self.assertEqual(offset, len(a) + 1 + len(b) + 1)
+            self.assertEqual(self.ledger_lines(cfg), [a, b])
+            self.assertIn("watch reopen", out.getvalue())
+            self.assertIn("appended=1", out.getvalue())
+            self.assertIn("dup=1", out.getvalue())
+        finally:
+            worker.close()
+
+    def test_retry_is_deferred_between_ticks_and_new_events_still_flow(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        self.register("dev-1")
+        transport = FakeTransport(send_responses=[
+            FakeResponse(429, {"error": {"code": 429,
+                                         "status": "QUOTA_EXCEEDED"}},
+                         headers={"Retry-After": "90"}),
+            FakeResponse(200, {"name": "projects/drill-project/"
+                                       "messages/m-2"}),
+            FakeResponse(200, {"name": "projects/drill-project/"
+                                       "messages/m-3"}),
+        ])
+        events_path = self._events_path()
+        a = self.event_line(seq=1)
+        b = self.event_line(seq=2)
+        self._append_lines(events_path, [a])
+        worker = self.dispatcher(cfg, transport, resident=True)
+        try:
+            offset, identity = worker.watch_tick(events_path, 0, None)
+            self.assertEqual(transport.send_count(), 1)
+            self.assertEqual([r["state"] for r in
+                              self.delivery_records(cfg)], ["PENDING"])
+            # Tick 2 arrives while a's retry wait (90s) is running: b
+            # is ingested and sent immediately — the wait is deferred
+            # between ticks, never slept in-sweep (the fake clock has
+            # not moved at all).
+            self._append_lines(events_path, [b])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, offset,
+                                                     identity)
+            self.assertEqual(worker._clock_state["now"], 1_000_000.0)
+            self.assertEqual(transport.send_count(), 2)
+            self.assertEqual([r["state"] for r in
+                              self.delivery_records(cfg)],
+                             ["PENDING", "ACCEPTED"])
+            # Tick 3: a's retry is due, so it is retried now.
+            worker._clock_state["now"] += 91
+            with contextlib.redirect_stdout(out):
+                worker.watch_tick(events_path, offset, identity)
+            self.assertEqual(transport.send_count(), 3)
+            records = self.delivery_records(cfg)
+            self.assertEqual([r["state"] for r in records],
+                             ["PENDING", "ACCEPTED", "ACCEPTED"])
+            self.assertEqual([r["attempts"] for r in records],
+                             [1, 1, 2])
+        finally:
+            worker.close()
+
+    def test_shrinking_watch_file_is_a_ledger_fault(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        a = self.event_line(seq=1)
+        b = self.event_line(seq=2)
+        self._append_lines(events_path, [a, b])
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            offset, identity = worker.watch_tick(events_path, 0, None)
+            self.assertEqual(offset, len(a) + 1 + len(b) + 1)
+            # Truncate the consumed bytes away WITHOUT changing the
+            # inode: an append-only violation. Fail closed (exit 4
+            # class), never a silent rescan.
+            with open(events_path, "r+b") as f:
+                f.truncate(len(a) + 1)
+            with self.assertRaises(notify_ledger.LedgerFault):
+                worker.watch_tick(events_path, offset, identity)
+        finally:
+            worker.close()
+
+    def test_bad_batch_is_refused_and_retried_next_tick(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        a = self.event_line(seq=1)
+        c = self.event_line(seq=3)
+        with open(events_path, "wb") as f:
+            f.write(a + b"\n")
+            f.write(b'{"event_type":"BROKEN"\n')  # invalid JSON line
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            err = io.StringIO()
+            out = io.StringIO()
+            with contextlib.redirect_stderr(err), \
+                 contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, 0,
+                                                     None)
+            # All-or-nothing: the valid line is NOT appended either,
+            # the offset does not advance, the alarm names the fault.
+            self.assertEqual(self.ledger_lines(cfg), [])
+            self.assertEqual(offset, 0)
+            self.assertIn("WATCH BATCH REFUSED", err.getvalue())
+            self.assertIn("refused=1", out.getvalue())
+            # A later line cannot jump the fence: the next tick retries
+            # the whole batch (still refused).
+            self._append_lines(events_path, [c])
+            with contextlib.redirect_stderr(err), \
+                 contextlib.redirect_stdout(out):
+                offset, identity = worker.watch_tick(events_path, offset,
+                                                     identity)
+            self.assertEqual(self.ledger_lines(cfg), [])
+            self.assertEqual(offset, 0)
+            self.assertIn("WATCH BATCH REFUSED", err.getvalue())
+        finally:
+            worker.close()
+
+    def test_missing_events_file_waits_and_is_not_an_error(self):
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        worker = self.dispatcher(cfg, FakeTransport(), resident=True)
+        try:
+            offset, identity = worker.watch_tick(events_path, 0, None)
+            self.assertEqual(offset, 0)
+            self.assertIsNone(identity)
+            # The file appears later: the same tick contract applies.
+            line = self.event_line(seq=1)
+            self._append_lines(events_path, [line])
+            offset, identity = worker.watch_tick(events_path, offset,
+                                                 identity)
+            self.assertEqual(offset, len(line) + 1)
+            self.assertEqual(self.ledger_lines(cfg), [line])
+        finally:
+            worker.close()
+
+
+class TestResidentProcess(Base):
+    """The resident worker as a real OS process: SIGTERM shutdown is
+    clean (exit 0) and a restart over the same events file ingests
+    nothing twice (the crash-restart idempotency). No device is
+    registered here, so no network call is ever attempted."""
+
+    def test_sigterm_shutdown_and_restart_are_clean_and_idempotent(self):
+        path, cfg = self.config()
+        self.write_service_account(cfg)
+        events_path = self._events_path()
+        line = self.event_line(seq=1)
+        self._append_lines(events_path, [line])
+        cmd = [sys.executable, "notify_dispatcher.py",
+               "--config", path, "--watch", events_path]
+        notify_dir = os.path.dirname(os.path.abspath(__file__))
+
+        def run_worker():
+            proc = subprocess.Popen(cmd, cwd=notify_dir,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            try:
+                lines = _wait_for_line("watch tick", proc.stdout)
+            finally:
+                proc.send_signal(signal.SIGTERM)
+            try:
+                rest, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise
+            return proc.returncode, lines, rest, err
+
+        rc, lines, rest, err = run_worker()
+        self.assertEqual(rc, 0)
+        all_out = "\n".join(lines) + rest.decode("utf-8", "replace")
+        self.assertIn("watch start", all_out)
+        self.assertIn("watch stop", all_out)
+        self.assertIn("appended=1", lines[-1])
+        # Every resident stdout line carries the ISO timestamp prefix.
+        for text in all_out.splitlines():
+            if text.strip():
+                self.assertRegex(
+                    text,
+                    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+09:00 ")
+        self.assertNotIn("REFUSED", err.decode("utf-8", "replace"))
+        self.assertEqual(self.ledger_lines(cfg), [line])
+        # Restart over the same events file: the full rescan re-ingests
+        # nothing (event_id dedup) and the released locks let the
+        # second worker start cleanly.
+        rc2, lines2, rest2, err2 = run_worker()
+        self.assertEqual(rc2, 0)
+        self.assertIn("watch start", "\n".join(lines2))
+        self.assertIn("appended=0", lines2[-1])
+        self.assertIn("dup=1", lines2[-1])
+        self.assertEqual(self.ledger_lines(cfg), [line])
 
 
 if __name__ == "__main__":
