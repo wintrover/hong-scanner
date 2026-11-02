@@ -7,8 +7,8 @@
 - 상위 계약: tools/api/README.md §1·§5 (serve.py 구동·보안 경계,
   `--bind 0.0.0.0` 컨테이너 전용), docs/REPLAY_CONTRACT.md §13,
   docs/GATES.md.
-- Phase-0 범위: **API 서버 상시 실행형 단일 컨테이너**. supervisor(PR-4)와
-  공급망·증명(PR-5)이 이 위에서 확장된다 — §7·§8 (§8은 본 PR에서 구현됨).
+- Phase-0 범위: **API 서버 상시 실행형 단일 컨테이너**. 그 위에 런타임
+  supervisor(PR-4, §7)와 공급망·증명(PR-5, §8 — 구현됨)이 확장된다.
 
 ## 1. 이미지 구성 (변경 불가)
 
@@ -16,11 +16,11 @@
 |---|---|
 | base | `python:3.13-slim` — serve.py는 표준 라이브러리만 사용(http.server), **serve.py를 위한 pip 설치 금지**; 유일한 pip 설치는 collector sidecar의 버전 고정 의존성(websockets==17.3, `tools/collector/requirements.txt`) |
 | 사용자 | 비루트 `hongscanner` (system user, nologin) |
-| 코드 | `/opt/hongscanner/` — `serve.py` · `bin/hongscanner` · `bin/collector` · `bin/sidecar.py`(collector 바이너리 옆) · `tools/collector/requirements.txt` · `tools/notify/{notify_dispatcher,notify_config,notify_fcm,notify_ledger}.py` · `CALENDAR_INDEX.sha256` |
+| 코드 | `/opt/hongscanner/` — `serve.py` · `cloud_supervisor.py` · `bin/hongscanner` · `bin/collector` · `bin/sidecar.py`(collector 바이너리 옆) · `tools/collector/requirements.txt` · `tools/notify/{notify_dispatcher,notify_config,notify_fcm,notify_ledger}.py` · `CALENDAR_INDEX.sha256` |
 | 데이터 | `/var/lib/hongscanner/` — `runs/` · `notify/` (볼륨 마운트 지점, 빈 상태로 이미지에 존재) |
-| 환경 | `ENV HSCOLLECTOR_PYTHON=python3` — collector.nim의 sidecar 인터프리터 탐색(`$HSCOLLECTOR_PYTHON` → 바이너리 옆 `.venv/bin/python` → `python3`)의 첫 경로를 고정 |
-| 노출 | `EXPOSE 8080`, `STOPSIGNAL SIGTERM` |
-| CMD | `python3 /opt/hongscanner/serve.py --bind 0.0.0.0 --port 8080 --runs /var/lib/hongscanner/runs --ledger /var/lib/hongscanner/notify/ledger.hcj.jsonl` |
+| 환경 | `ENV HSCOLLECTOR_PYTHON=python3` — sidecar 인터프리터 탐색(`$HSCOLLECTOR_PYTHON` → 바이너리 옆 `.venv/bin/python` → `python3`)의 첫 경로를 고정. + supervisor 핀 6건: `HS_API_BIND=0.0.0.0` · `HS_API_PORT=8080` · `HS_SUPERVISOR_PROBE_PORT=8081` · `HS_DATA_ROOT=/var/lib/hongscanner` · `HS_CALENDAR_DIR=/var/lib/hongscanner/calendars` · `HS_CALENDAR_INDEX=/opt/hongscanner/CALENDAR_INDEX.sha256` — §7.4 코드 기본값과 동일한 값으로 이미지 표면을 자기완결적으로 만든다 |
+| 노출 | `EXPOSE 8080 8081`, `STOPSIGNAL SIGTERM` |
+| ENTRYPOINT | `python3 /opt/hongscanner/cloud_supervisor.py` — 상시 실행 프로세스는 supervisor다(§7). API 자식(serve.py)의 바인드·포트·runs·ledger는 위 ENV 핀과 §7.4 기본값에서 온다 |
 
 - **`--bind 0.0.0.0`은 Northflank ingress 뒤 컨테이너 전용이다.** 이 API에는
   인증이 없고, 0.0.0.0 바인드의 접근 통제는 플랫폼(Northflank ingress Basic
@@ -31,16 +31,16 @@
   <bind>:<port>` 한 줄 flush — 스크립트·supervisor가 기동 증거로 쓴다.
   SIGTERM/SIGINT로 조용히 드레인 후 exit 0. exit 2 = 사용법·설정 위반,
   exit 4 = 바인드 실패. 실패를 exit 0으로 꾸미는 경로는 없다.
-- **CMD는 Phase-0 값이다**: PR-4의 cloud_supervisor ENTRYPOINT로 대체될
-  예정이다. 이미지 레이아웃(경로·사용자·볼륨)이 안정 표면이다.
+- **ENTRYPOINT는 PR-4 값이다**: 상시 프로세스는 cloud_supervisor다(§7).
+  이미지 레이아웃(경로·사용자·볼륨)과 ENV 핀이 안정 표면이다.
 - **sidecar·notify 배선**: collector.nim은 sidecar **스크립트**를 자기
   바이너리 옆(`getAppDir()/sidecar.py`)에서, 인터프리터를
   `$HSCOLLECTOR_PYTHON`에서 먼저 찾는다. 이미지는 그 두 첫 경로에 맞춰
   `bin/sidecar.py`와 `ENV HSCOLLECTOR_PYTHON=python3`를 공급한다.
   notify_dispatcher는 형제 모듈을 flat import하므로 네 파일이 한
   디렉터리에 함께 있다. **collector·sidecar·notify를 어떤 프로세스로
-  띄우는가**(실행 인자·env)는 PR-4의 cloud_supervisor 표면이다 — PR-4
-  병합 후 supervisor 환경변수로 이 경로들이 최종 배선된다(§8).
+  띄우는가**(실행 인자·env)는 supervisor 표면이다 — §7.4 env 기본값이
+  이 경로들로 배선한다(§8.4 기록).
 - 데이터는 요청마다 볼륨에서 다시 읽는다(상태 캐시 없음 — README §1).
 - ledger(`notify/ledger.hcj.jsonl`)는 **볼륨 공급이지 이미지에 구운 것이
   아니다**: 이미지는 비어 있는 `notify/`만 만든다. `runs/`도 마찬가지다.
@@ -57,6 +57,7 @@ Docker의 일반 COPY는 **빌드 컨텍스트 밖 파일에 도달할 수 없�
 2. 그 디렉터리를 컨텍스트로 `docker build`한다.
 3. Dockerfile은 **컨텍스트 내 상대 경로만** COPY한다: `bin/hongscanner`,
    `bin/collector`, `tools/api/serve.py`,
+   `tools/container/cloud_supervisor.py`,
    `tools/collector/{sidecar.py,requirements.txt}`,
    `tools/notify/{notify_dispatcher,notify_config,notify_fcm,
    notify_ledger}.py`, `calendars/CALENDAR_INDEX.sha256`.
@@ -66,10 +67,11 @@ Docker의 일반 COPY는 **빌드 컨텍스트 밖 파일에 도달할 수 없�
 ```sh
 CTX="$(mktemp -d)"
 mkdir -p "$CTX/bin" "$CTX/tools/api" "$CTX/tools/collector" \
-         "$CTX/tools/notify" "$CTX/calendars"
+         "$CTX/tools/container" "$CTX/tools/notify" "$CTX/calendars"
 cp Dockerfile                      "$CTX/Dockerfile"
 cp .dockerignore                   "$CTX/.dockerignore"
 cp tools/api/serve.py              "$CTX/tools/api/serve.py"
+cp tools/container/cloud_supervisor.py "$CTX/tools/container/cloud_supervisor.py"
 cp calendars/CALENDAR_INDEX.sha256 "$CTX/calendars/CALENDAR_INDEX.sha256"
 cp tools/collector/sidecar.py      "$CTX/tools/collector/sidecar.py"
 cp tools/collector/requirements.txt "$CTX/tools/collector/requirements.txt"
@@ -140,6 +142,7 @@ docker build -t <tag> [--label org.hongscanner.image-purpose=ci-test] "$CTX"
 ```
 /opt/hongscanner/              # 이미지 레이어 (코드, 읽기 전용 운명)
   serve.py
+  cloud_supervisor.py          # ENTRYPOINT — 상시 실행 supervisor (§7)
   bin/hongscanner
   bin/collector
   bin/sidecar.py               # collector 바이너리 옆 (collector.nim 탐색 경로)
@@ -163,18 +166,24 @@ docker build -t <tag> [--label org.hongscanner.image-purpose=ci-test] "$CTX"
 
 - `bash tests/test_container_contract.sh`: 실측 스모크. mktemp 샌드박스 →
   테스트 바이너리 두 개(hongscanner·collector) nim 직접 컴파일 →
-  스테이징 컨텍스트(Dockerfile·.dockerignore·serve.py·INDEX·두
-  바이너리·sidecar·requirements·notify 4모듈) →
+  스테이징 컨텍스트(Dockerfile·.dockerignore·serve.py·
+  cloud_supervisor.py·INDEX·두 바이너리·sidecar·requirements·
+  notify 4모듈) →
   `docker build --label org.hongscanner.image-purpose=ci-test` →
   .dockerignore 효력 실측(decoy calendar json의 COPY 실패) →
   이미지 내부 검증(레이아웃·실행 비트·바인드 바이트 일치·INDEX·라벨·비루트·
-  collector sha256 일치·sidecar/notify 경로·`HSCOLLECTOR_PYTHON=python3`·
+  supervisor ENTRYPOINT·supervisor env 핀 6건·`HSCOLLECTOR_PYTHON=python3`·
+  EXPOSE 8080+8081·collector sha256 일치·sidecar/notify 경로·
   `python3 -c "import websockets"` + 버전 17.3·collector usage exit 2) →
   합성 fixture(runs 루트 + 2-레코드 ledger, tools/api/test_api.py의
-  구성 방식)를 `-v` 마운트해 `docker run -d -p 127.0.0.1::<임시포트>:8080` →
-  로그에서 `SERVE 0.0.0.0:8080` 대기 → `GET /status` 200·본문 JSON 검증 →
-  `POST /status` 405(`Allow: GET`) → 미지 경로 404 → `docker stop`
-  (SIGTERM) → exit 0·비-OOM 관측 → 컨테이너·이미지 제거와 잔류 0 단언.
+  구성 방식)를 `-v` 마운트해 `docker run -d -p 127.0.0.1::<임시포트>:8080`
+  (ENTRYPOINT는 supervisor다. fixture에는 캘린더 볼륨이 없으므로
+  supervisor는 초기화 미완료 /startup 503·세션 없음 — API 자식은
+  언제나 뜬다) → 로그에서 `SERVE 0.0.0.0:8080` 대기(supervisor가 자식
+  stdout을 무접두어 전달하므로 serve.py 계약 줄이 그대로 관측된다) →
+  `GET /status` 200·본문 JSON 검증 → `POST /status` 405(`Allow: GET`) →
+  미지 경로 404 → `docker stop`(SIGTERM → supervisor가 자식 드레인) →
+  exit 0·비-OOM 관측 → 컨테이너·이미지 제거와 잔류 0 단언.
 - **docker가 없으면 fail-closed**: docker CLI 부재·데몬 불도응은
   exit 1 + 명확한 메시지다. 게이트(`tools/run_tests.sh`)가 이 스위트를
   포함하므로 **docker 없는 환경에서 게이트는 실패한다 — 의도된 계약**이다.
@@ -187,14 +196,100 @@ docker build -t <tag> [--label org.hongscanner.image-purpose=ci-test] "$CTX"
   tests/test_container_contract.sh`)의 exit 0. 단독 통과는 게이트가
   아니다. 전체 게이트에 이 스위트로 몇 분이 더해진다(이미지 빌드·pull).
 
-## 7. 범위 밖 (향후 PR)
+## 7. Cloud Runtime Supervisor (PR-4)
 
-- **PR-4**: cloud_supervisor — CMD의 ENTRYPOINT 대체, serve.py 자식
-  프로세스 감시, 캘린더 볼륨 vs 이미지 INDEX 교차 검증의 **실행**,
-  컨테이너 내 바이너리 실행 호환성 확인, collector·sidecar·notify 실행
-  인자·env의 최종 배선(§8).
-- **PR-5 공급망·증명은 §8로 구현·문서화되어 있다** (attest 확장·운영
-  이미지·GHCR·이미지 digest 증명).
+컨테이너의 상시 실행 프로세스는 `tools/container/cloud_supervisor.py`(표준
+라이브러리만)다 — `Dockerfile`의 ENTRYPOINT. 역할은 **실행 어댑터에만 묶여
+있다**: 자식 프로세스 수명과 세션 스케줄링. 시장 판단은 Nim core가,
+기록은 Collector/Recorder가 한다 — supervisor는 판단하지 않고 run
+디렉터리에 아무것도 쓰지 않는다. 모든 실패는 fail-closed다: 검증 실패·
+전제 부재는 세션 거부이지 완화된 실행이 아니다.
+
+### 7.1 자식 프로세스와 재시작 소유권
+
+| 자식 | 역할 | 재시작 규칙 |
+|---|---|---|
+| API (`serve.py`) | 상시 실행. stdout의 `SERVE <bind>:<port>` 한 줄이 기동 증거(tools/api/README.md §1) — supervisor가 자식 stdout을 **무접두어 그대로 전달**하므로 컨테이너 로그는 원래 계약 줄을 그대로 유지한다 | 죽으면 짧은 백오프 뒤 **항상** 재시작. exit 2(설정 위반)도 재시작하며 /ready는 503을 유지한다 — 실패를 성공으로 바꾸는 경로는 없다 |
+| collector | 하루 최대 시도 3, 세션당 1개, **활성 collector는 언제나 정확히 1개**(단일 스레드 세션 제어 + collector 자체 O_EXCL이 2차 방어) | 세션 수명은 supervisor 내부 소유 — 15:40 watchdog SIGTERM·세션 종료 처리 |
+| notify worker | 세션 상주, run의 `events.hcj.jsonl` 감시 | 비정상 종료는 세션 중 재시작(worker의 full-rescan event_id dedup이 멱등성 보장); SIGTERM→exit 0은 정상 종료라 재시작 없음 |
+
+- **재시작 소유권 분리: supervisor는 자식을, Northflank는 컨테이너를
+  재시작한다.** 자식 수명은 supervisor의 내부 책임이고 어떤 프로브에도
+  노출되지 않는다(아래 계약 A). 컨테이너 재시작 신호는 /live 503뿐이다.
+- STOPSIGNAL SIGTERM: supervisor가 자식들을 드레인하고 exit 0으로
+  끝난다(`docker stop` = 이 경로, 스위트가 실측한다).
+
+### 7.2 프로브 (supervisor 자체 stdlib HTTP 서버 — serve.py가 아니다; 포트 8081)
+
+| 경로 | 200 조건 | 503 의미 | Northflank 매핑 |
+|---|---|---|---|
+| `/startup` | 초기화 완료 **래치** — config + 캘린더 볼륨 vs 구운 INDEX 교차 검증 성공 **그리고** API 자식 서빙 중. 한 번 200이면 래치된다 | 초기화 미완료 | Startup probe → `/startup` |
+| `/ready` | API 자식이 서빙 중(`state=serving`) | API 자식 부재 — **트래픽 게이팅 전용, 절대 컨테이너 재시작 신호가 아니다** | Readiness probe → `/ready` |
+| `/live` | supervisor 루프 하트비트 신선(임계 `max(2×HS_TICK_SECONDS, 10s)`) | 루프 정지 — **컨테이너 재시작 신호** | Liveness probe → `/live` |
+
+- **계약 A — 자식 업무 상태 미노출**: collector/worker 상태는 어떤 프로브에도
+  나오지 않는다. 세션 종료 이후의 collector/worker 부재는 정상이지 재시작
+  사유가 아니다.
+- **Northflank에는 저장소가 설정을 담지 않는다**: 프로브 설정은 플랫폼
+  콘솔의 수동 단계이며 startup→`/startup`, readiness→`/ready`,
+  liveness→`/live`, 포트 8081이다. GET 전용 — 그 외 메서드는 405,
+  미지 경로는 404.
+
+### 7.3 세션 멱등성 (부팅·재시작 어디에서든 같은 결론)
+
+- 오늘 날짜의 **COMMITTED run**(input.hcj.jsonl.committed 마커)이 있으면
+  그날은 끝 — 새 세션 없음.
+- **미봉인(unsealed) run은 사전 증거다 — 재개하지 않고, 덮어쓰지 않고,
+  보존한다**; 남은 시간 안이면 새 run_id(`ph1-<date>-a`, `-b`, …)로
+  시도한다.
+- 시도 상한 3(오늘 존재하는 run 디렉터리 수가 시도 수), 시작 08:50,
+  최종 시작 15:30, watchdog 15:40 KST(기본값 — §7.4).
+- collector 종료 판정: exit 0 = 봉인(COMMITTED), exit 4 = 정직한
+  INCOMPLETE, 그 외(exit 2·3·시그널) = preserved. **어떤 종료도
+  성공으로 승격되지 않는다.**
+- 세션 종료 시 worker를 SIGTERM으로 정상 종료한다. 기록의 권위는
+  events.hcj.jsonl이므로 어느 쪽 종료든 기록은 보존된다.
+
+### 7.4 환경변수 (전부 env-only, 기본값 = 이미지 핀값)
+
+| 변수 | 기본값 | 의미 |
+|---|---|---|
+| `HS_API_BIND` | `0.0.0.0` | API 자식 바인드(§1 — 컨테이너 전용) |
+| `HS_API_PORT` | `8080` | API 포트 |
+| `HS_SUPERVISOR_PROBE_PORT` | `8081` | 프로브 포트(호스트는 `HS_SUPERVISOR_PROBE_HOST`, 기본 `0.0.0.0`) |
+| `HS_DATA_ROOT` | `/var/lib/hongscanner` | 데이터 루트 — `runs/`·`notify/ledger.hcj.jsonl`가 여기서 파생 |
+| `HS_CALENDAR_DIR` | `/var/lib/hongscanner/calendars` | 캘린더 볼륨(볼륨 공급, §4) |
+| `HS_CALENDAR_INDEX` | `/opt/hongscanner/CALENDAR_INDEX.sha256` | 이미지에 구운 INDEX(§4) |
+| `HS_SERVE_SCRIPT` | `/opt/hongscanner/serve.py` | API 자식 스크립트 |
+| `HS_COLLECTOR_BIN` | `/opt/hongscanner/bin/collector` | collector 바이너리 |
+| `HS_NOTIFY_SCRIPT` | `/opt/hongscanner/tools/notify/notify_dispatcher.py` | notify worker 스크립트(flat import 형제와 동일 디렉터리) |
+| `HS_NOTIFY_CONFIG` | `/var/lib/hongscanner/notify/notify_config.json` | notify 설정(볼륨 공급) |
+| `HS_API_PYTHON` · `HS_WORKER_PYTHON` | supervisor 자신의 인터프리터 | 자식 인터프리터 |
+| `HS_SESSION_START` · `HS_SESSION_LAST_START` · `HS_SESSION_WATCHDOG` | `08:50` · `15:30` · `15:40` (KST) | 세션 창·watchdog |
+| `HS_SESSION_MAX_ATTEMPTS` | `3` | 하루 시도 상한 |
+| `HS_TICK_SECONDS` | `30` | 루프 틱 |
+| `HS_API_RESTART_SECONDS` · `HS_WORKER_RESTART_SECONDS` | `2.0` | 자식 재시작 백오프(초) |
+| `HS_WORKER_MAX_RESTARTS` | `5` | 세션당 worker 재시작 한계(초과 시 push 중단·수집 계속) |
+| `HS_SESSION_TAIL_GRACE` · `HS_KILL_GRACE_SECONDS` | `3.0` · `10.0` | 세션 종료 유예·SIGKILL 전 유예(초) |
+| `HS_PROBE_STARTUP_PATH` · `HS_PROBE_READY_PATH` · `HS_PROBE_LIVE_PATH` | `/startup` · `/ready` · `/live` | 프로브 경로 |
+| `HS_KIWOOM_PROFILE` | `demo` | collector `--profile` |
+
+- **HSCOLLECTOR_PYTHON 배선**: supervisor는 자식 env를 만지지 않고
+  상속시킨다 — collector의 sidecar 인터프리터 탐색은 이미지의
+  `ENV HSCOLLECTOR_PYTHON=python3`(§1)을 그대로 따른다.
+- collector 자식은 `--token-source=env`로 띄운다 — 자격증명은 런타임
+  Northflank Secret Group 주입이고(§8.4) supervisor 코드는 자격증명을
+  읽지 않는다.
+- supervisor의 stdout(`SUPERVISOR` 접두·KST 타임스탬프, 결정마다 1줄)이
+  컨테이너 로그다. 종료 코드: 0 = 정상(SIGTERM/SIGINT 드레인), 2 = 설정
+  오류, 4 = 프로브 바인드 실패, 1 = 내부 결함 — 컨테이너 재시작은
+  플랫폼 몫이다.
+- 계약 스위트: `bash tools/container/test_supervisor.sh`(게이트는
+  `tools/run_tests.sh` 경유) — 가짜 자식·주입 클록·루프백 프로브만으로
+  이 §7 표면을 실측한다(실 collector·실세션·시장 데이터 없음).
+
+### 7.5 범위 밖
+
 - 이미지 서명(cosign 등 추가 서명 체계)·배치 자동화(CD) — 범위 밖.
 - 인증·TLS·헬스체크 인프라 — tools/api/README.md §7과 동일하게 범위 밖.
 
@@ -285,9 +380,9 @@ main push 하나가 **세 개의 SLSA 증명 대상**을 만든다. 모두 동�
   계약 측정 근거)를 그 인터프리터로 설치한다. 테스트 스위트가 이미지
   내부에서 `import websockets`와 버전 17.3을 실측한다.
 - **프로세스 배선**: collector·sidecar·notify를 어떤 프로세스로 띄우는가
-  (실행 인자·환경변수·watch 모드)는 PR-4의 cloud_supervisor 표면이다 —
-  PR-4 병합 후 supervisor 환경변수가 §5의 경로들로 최종 배선한다. 이
-  Dockerfile은 경로·사용자·볼륨의 안정 표면만 약속한다(§1).
+  (실행 인자·환경변수·watch 모드)는 cloud_supervisor 표면이다 — §7.4의
+  env 기본값이 §5의 경로들로 배선하며, 이미지는 그 기본값을 ENV로 핀한다
+  (§1). 이 Dockerfile은 경로·사용자·볼륨의 안정 표면만 약속한다(§1).
 - **신뢰 한계**(docs/LIMITS.md bounded trust): 이미지 digest 증명도
   GitHub가 서명한 증명이다 — GitHub 인프라와 분리된 독립 증명은 아니며,
   관리자 신뢰 뿌리를 제거하지 않는다. `gh attestation verify`는 언제든
