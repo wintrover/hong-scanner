@@ -51,14 +51,17 @@ void main() {
     });
   });
 
-  test('default push service is the no-op until Firebase is wired', () {
+  test('default push service is FCM and fails closed until Firebase is wired', () {
     final PushService service = defaultPushService();
 
-    expect(service, isA<NoopPushService>());
+    expect(service, isA<FcmPushService>());
     expect(service.isReady, isFalse);
+    final fcm = service as FcmPushService;
+    expect(() => fcm.register(), throwsStateError);
+    expect(() => fcm.tapMessages, throwsStateError);
   });
 
-  test('default app store composes the no-op service', () {
+  test('default app store composes the FCM service (unwired without Firebase init)', () {
     final store = defaultAppStore();
     expect(store.pushState.phase, PushPhase.unwired);
     store.dispose();

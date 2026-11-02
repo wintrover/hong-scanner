@@ -111,9 +111,11 @@ notification re-synthesis are forbidden by design.
 
 ### Firebase handoff checklist (updated for PR-7)
 
-No Firebase project exists yet — the app ships with
-`NoopPushService`, so `FcmPushService` stays fail-closed. When the
-project arrives:
+The Firebase project is wired (steps 1–4 are done): `flutterfire
+configure` generated `lib/firebase_options.dart` and the Gradle plugin
+markers, and `defaultPushService()` composes `const FcmPushService()`.
+`FcmPushService` still fails closed (throws `StateError`) on any device
+where `Firebase.initializeApp` has not run. Remaining live steps:
 
 1. **google-services.json** — place it at
    `android/app/google-services.json` (Firebase console, package
