@@ -18,15 +18,20 @@
 ##                             - absolute path,
 ##                             - OUTSIDE this repository (never inside it),
 ##                             - new or empty,
-##                             - $CI_BUILD_OUT/hongscanner must not exist.
-##                           The build writes only these, both new:
+##                             - $CI_BUILD_OUT/hongscanner must not exist,
+##                             - $CI_BUILD_OUT/collector must not exist.
+##                           The build writes only these, all new:
 ##                             $CI_BUILD_OUT/hongscanner  the release binary
-##                             $CI_BUILD_OUT/nimcache/    the compile cache
+##                             $CI_BUILD_OUT/collector    the release collector
+##                             $CI_BUILD_OUT/nimcache/    the hongscanner cache
+##                             $CI_BUILD_OUT/nimcache-collector/  the
+##                                 collector cache (separate on purpose: one
+##                                 cache directory per -d set, no reuse)
 ##                           Nothing inside the repository is written: an
 ##                           existing ./hongscanner (a canonical
 ##                           tools/build.sh product, gitignored) is never
 ##                           clobbered, and no test artifact can be mistaken
-##                           for the attested binary. Local manual runs must
+##                           for an attested binary. Local manual runs must
 ##                           supply their own fresh directory, e.g.
 ##                           CI_BUILD_OUT="$(mktemp -d)".
 ##
@@ -41,10 +46,16 @@
 ##   nim is the pinned 2.2.10 (verified, not assumed).
 ##
 ## The -d defines below are the contract src/hs/binfo.nim consumes (see
-## tools/build.sh for the canonical injection). After the build, every
-## consumer in attest.yml -- doctor, selftest, the attestation subject, the
-## checksum, the build report and the artifact uploads -- uses this exact
-## path: $CI_BUILD_OUT/hongscanner.
+## tools/build.sh for the canonical injection) and only the hongscanner
+## binary carries them: the collector entry point
+## (tools/collector/collector.nim) imports no binfo/verify module, so
+## those defines would be dead metadata there -- the collector's
+## provenance evidence is its own attestation subject
+## (collector-linux-<arch> in attest.yml), not embedded metadata. After
+## the build, every consumer in attest.yml -- doctor, selftest, the
+## attestation subjects, the checksums, the build reports, the artifact
+## uploads and the image staging -- uses exactly these two paths:
+## $CI_BUILD_OUT/hongscanner and $CI_BUILD_OUT/collector.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -113,6 +124,10 @@ if [ -e "$CI_BUILD_OUT/hongscanner" ]; then
   echo "BUILD REFUSED: refusing to overwrite existing $CI_BUILD_OUT/hongscanner" >&2
   exit 1
 fi
+if [ -e "$CI_BUILD_OUT/collector" ]; then
+  echo "BUILD REFUSED: refusing to overwrite existing $CI_BUILD_OUT/collector" >&2
+  exit 1
+fi
 
 ## Read-only refetch of main. Verbose on purpose: the fetched range is
 ## evidence in the CI log.
@@ -151,4 +166,18 @@ if [ ! -x "$CI_BUILD_OUT/hongscanner" ]; then
   exit 1
 fi
 
-echo "CI BUILD OK out=$CI_BUILD_OUT commit=$head source_ref=main origin_main=$origin_main nim=$nim_line"
+## The collector release binary (PR-5): the same guards, the same fail-
+## closed posture, one more subject. No hsBuild* injection here -- see the
+## header: tools/collector/collector.nim consumes none of those defines
+## (its import graph has no binfo/verify), and a define nothing reads is
+## not provenance. Its own nimcache keeps the two builds' -d sets apart.
+nim c -d:release --hints:off --warnings:off --path:src \
+  --nimcache:"$CI_BUILD_OUT/nimcache-collector" \
+  -o:"$CI_BUILD_OUT/collector" tools/collector/collector.nim
+
+if [ ! -x "$CI_BUILD_OUT/collector" ]; then
+  echo "BUILD REFUSED: $CI_BUILD_OUT/collector was not produced" >&2
+  exit 1
+fi
+
+echo "CI BUILD OK out=$CI_BUILD_OUT commit=$head source_ref=main origin_main=$origin_main nim=$nim_line binaries=hongscanner,collector"

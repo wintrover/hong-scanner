@@ -8,11 +8,14 @@
 # away — docs.docker.com). Whoever builds the image stages the needed
 # files into a fresh directory first (mktemp) and passes THAT directory
 # as the context:
-#   Dockerfile · bin/hongscanner · tools/api/serve.py
+#   Dockerfile · bin/hongscanner · bin/collector · tools/api/serve.py
+#   tools/collector/sidecar.py · tools/collector/requirements.txt
+#   tools/notify/{notify_dispatcher,notify_config,notify_fcm,
+#                 notify_ledger}.py
 #   calendars/CALENDAR_INDEX.sha256
 # The production image is built the same way by the attestation job
-# (PR-5) from the attested CI_BUILD_OUT binary. This file is the shared
-# build contract, never a build-from-source recipe.
+# (attest.yml, PR-5) from the two attested CI_BUILD_OUT binaries. This
+# file is the shared build contract, never a build-from-source recipe.
 #
 # Binary contract (tools/container/README.md §3): test binaries and the
 # production binary are separate artifacts. An image carrying a locally
@@ -32,11 +35,46 @@
 # enforced from PR-4).
 FROM python:3.13-slim
 
-# serve.py is standard library only (http.server) — no pip installs,
-# ever (tools/api/README.md §0).
+# Secret boundary (tools/container/README.md §8): NO credential ever
+# enters this image or its build context — APP_KEY_MOCK / APP_SECRET_MOCK
+# and the FCM service-account JSON are runtime secrets injected by the
+# Northflank Secret Group env; the .dockerignore whitelist passes none of
+# them, and nothing here bakes, mounts or references any credential.
+
+# serve.py is standard library only (http.server) — nothing is installed
+# for it, ever (tools/api/README.md §0). The one pip install below
+# belongs to the collector sidecar and is exactly the version-pinned
+# dependency its wire contract is measured against
+# (tools/collector/requirements.txt: websockets==17.3).
 COPY tools/api/serve.py /opt/hongscanner/serve.py
 COPY bin/hongscanner /opt/hongscanner/bin/hongscanner
 COPY calendars/CALENDAR_INDEX.sha256 /opt/hongscanner/CALENDAR_INDEX.sha256
+
+# PR-5 supply chain (tools/container/README.md §8): the collector binary
+# and the sidecar/notify adapters join the image. collector.nim resolves
+# the sidecar SCRIPT next to its own binary (getAppDir()/sidecar.py,
+# collector.nim:74-79) and the sidecar INTERPRETER through
+# $HSCOLLECTOR_PYTHON first (collector.nim:62-72) — pinned by ENV below.
+# The notify dispatcher imports its siblings flat (notify_config /
+# notify_fcm / notify_ledger), so all four live in one directory. The
+# final entry-point wiring (which process the supervisor starts with
+# which args/env) is PR-4's cloud_supervisor surface: after PR-4 merges,
+# the supervisor's environment variables name these paths (README §8).
+COPY bin/collector /opt/hongscanner/bin/collector
+COPY tools/collector/sidecar.py /opt/hongscanner/bin/sidecar.py
+COPY tools/collector/requirements.txt /opt/hongscanner/tools/collector/requirements.txt
+COPY tools/notify/notify_dispatcher.py /opt/hongscanner/tools/notify/notify_dispatcher.py
+COPY tools/notify/notify_config.py /opt/hongscanner/tools/notify/notify_config.py
+COPY tools/notify/notify_fcm.py /opt/hongscanner/tools/notify/notify_fcm.py
+COPY tools/notify/notify_ledger.py /opt/hongscanner/tools/notify/notify_ledger.py
+
+RUN pip install --no-cache-dir \
+      -r /opt/hongscanner/tools/collector/requirements.txt
+
+# collector.nim checks $HSCOLLECTOR_PYTHON before the venv-slice and
+# system fallbacks; the image pins the base interpreter explicitly so the
+# sidecar runs on the interpreter pip installed websockets==17.3 into.
+ENV HSCOLLECTOR_PYTHON=python3
 
 # Code lives under /opt/hongscanner, data under /var/lib/hongscanner:
 # runs/ and notify/ are persistent-volume mount points (README §5) and
@@ -49,7 +87,8 @@ RUN groupadd --system hongscanner \
       hongscanner \
  && mkdir -p /var/lib/hongscanner/runs /var/lib/hongscanner/notify \
  && chown -R hongscanner:hongscanner /var/lib/hongscanner \
- && chmod 0755 /opt/hongscanner/bin/hongscanner
+ && chmod 0755 /opt/hongscanner/bin/hongscanner \
+ && chmod 0755 /opt/hongscanner/bin/collector
 
 USER hongscanner
 WORKDIR /opt/hongscanner
