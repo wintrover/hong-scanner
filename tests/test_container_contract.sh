@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 ## Container contract suite (tools/container/README.md): builds the
-## Phase-0 single-container image through the documented STAGED build
+## single-container image through the documented STAGED build
 ## context and exercises it end to end — image layout, purpose label,
-## fixture volumes, HTTP contract, SIGTERM shutdown, image removal.
+## supervisor ENTRYPOINT + env pins, fixture volumes, HTTP contract,
+## SIGTERM shutdown, image removal.
 ##
 ## Fail-closed: without a working docker CLI/daemon this exits 1 with a
 ## clear message. tools/run_tests.sh includes this suite, so a
@@ -24,6 +25,16 @@
 ## modules; the in-image asserts cover the collector (exec bit, byte
 ## identity), the sidecar/notify layout, $HSCOLLECTOR_PYTHON=python3 and
 ## the one pinned sidecar dependency (websockets==17.3 importable).
+##
+## PR-4 runtime supervisor (tools/container/README.md §7): the staged
+## context also carries tools/container/cloud_supervisor.py and the
+## image ENTRYPOINT is the supervisor. The asserts cover the
+## ENTRYPOINT, the supervisor env pins (exactly the code defaults), the
+## 8081 probe port and the supervisor file itself. The fixture run
+## below mounts no calendar volume, so the supervisor stays in
+## initialization (/startup 503) and starts no session; the API child
+## serves the SERVE line and /status regardless — that is the smoke's
+## subject here.
 ##
 ## Calendars: the git-tracked calendars/CALENDAR_INDEX.sha256 is staged
 ## and asserted byte-identical in the image; the real calendars/*.json
@@ -135,10 +146,12 @@ echo "ok   test collector compiles"; PASS=$((PASS + 1))
 # reach outside the context. .dockerignore travels with the context.
 CTX="$SANDBOX/context"
 mkdir -p "$CTX/bin" "$CTX/tools/api" "$CTX/tools/collector" \
-         "$CTX/tools/notify" "$CTX/calendars"
+         "$CTX/tools/container" "$CTX/tools/notify" "$CTX/calendars"
 cp "$REPO_ROOT/Dockerfile" "$CTX/Dockerfile"
 cp "$REPO_ROOT/.dockerignore" "$CTX/.dockerignore"
 cp "$REPO_ROOT/tools/api/serve.py" "$CTX/tools/api/serve.py"
+cp "$REPO_ROOT/tools/container/cloud_supervisor.py" \
+   "$CTX/tools/container/cloud_supervisor.py"
 cp "$REPO_ROOT/calendars/CALENDAR_INDEX.sha256" \
    "$CTX/calendars/CALENDAR_INDEX.sha256"
 cp "$BIN" "$CTX/bin/hongscanner"
@@ -160,6 +173,8 @@ assert_file_in_context() { # desc path
 assert_file_in_context "staged Dockerfile" "$CTX/Dockerfile"
 assert_file_in_context "staged .dockerignore" "$CTX/.dockerignore"
 assert_file_in_context "staged serve.py" "$CTX/tools/api/serve.py"
+assert_file_in_context "staged cloud_supervisor.py" \
+  "$CTX/tools/container/cloud_supervisor.py"
 assert_file_in_context "staged CALENDAR_INDEX.sha256" \
   "$CTX/calendars/CALENDAR_INDEX.sha256"
 assert_file_in_context "staged test binary" "$CTX/bin/hongscanner"
@@ -261,18 +276,30 @@ else
 fi
 
 EXPOSED="$(docker inspect --format '{{json .Config.ExposedPorts}}' "$IMAGE_TAG")"
-assert_contains "image exposes 8080/tcp" "$EXPOSED" "8080/tcp"
+assert_contains "image exposes 8080/tcp (API)" "$EXPOSED" "8080/tcp"
+assert_contains "image exposes 8081/tcp (supervisor probes)" "$EXPOSED" \
+  "8081/tcp"
 
 CMD_JSON="$(docker inspect --format '{{json .Config.Cmd}}' "$IMAGE_TAG")"
-assert_contains "CMD serves /opt/hongscanner/serve.py" "$CMD_JSON" \
-  '"/opt/hongscanner/serve.py"'
-assert_contains "CMD binds 0.0.0.0 (container-only, behind the platform ingress)" \
-  "$CMD_JSON" '"--bind","0.0.0.0"'
-assert_contains "CMD listens on 8080" "$CMD_JSON" '"--port","8080"'
-assert_contains "CMD reads the runs volume" "$CMD_JSON" \
-  '"/var/lib/hongscanner/runs"'
-assert_contains "CMD reads the ledger under the notify volume" "$CMD_JSON" \
-  '"/var/lib/hongscanner/notify/ledger.hcj.jsonl"'
+ENTRYPOINT_JSON="$(docker inspect --format '{{json .Config.Entrypoint}}' \
+  "$IMAGE_TAG")"
+assert_contains "ENTRYPOINT is the cloud runtime supervisor (PR-4)" \
+  "$ENTRYPOINT_JSON" '"/opt/hongscanner/cloud_supervisor.py"'
+assert_eq "no leftover CMD — the supervisor is the whole container command" \
+  "null" "$CMD_JSON"
+
+ENV_JSON="$(docker inspect --format '{{json .Config.Env}}' "$IMAGE_TAG")"
+assert_contains "ENV pins the API bind 0.0.0.0 (container-only, behind the ingress)" \
+  "$ENV_JSON" '"HS_API_BIND=0.0.0.0"'
+assert_contains "ENV pins the API port 8080" "$ENV_JSON" '"HS_API_PORT=8080"'
+assert_contains "ENV pins the supervisor probe port 8081" "$ENV_JSON" \
+  '"HS_SUPERVISOR_PROBE_PORT=8081"'
+assert_contains "ENV pins the data root (runs + ledger derive from it)" \
+  "$ENV_JSON" '"HS_DATA_ROOT=/var/lib/hongscanner"'
+assert_contains "ENV pins the calendar dir (volume-supplied, never baked)" \
+  "$ENV_JSON" '"HS_CALENDAR_DIR=/var/lib/hongscanner/calendars"'
+assert_contains "ENV pins the calendar index (baked)" "$ENV_JSON" \
+  '"HS_CALENDAR_INDEX=/opt/hongscanner/CALENDAR_INDEX.sha256"'
 
 # .dockerignore effectiveness probe (README §2/§4): in a probe context
 # with the same .dockerignore, a SYNTHETIC decoy calendar json must be
@@ -299,6 +326,7 @@ RC=0
 docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" -c '
 set -e
 test -f /opt/hongscanner/serve.py
+test -f /opt/hongscanner/cloud_supervisor.py
 test -x /opt/hongscanner/bin/hongscanner
 test -x /opt/hongscanner/bin/collector
 test -f /opt/hongscanner/bin/sidecar.py
@@ -313,7 +341,7 @@ test ! -e /var/lib/hongscanner/notify/ledger.hcj.jsonl
 [ "$(id -u)" -ne 0 ]
 [ "$(printenv HSCOLLECTOR_PYTHON)" = "python3" ]
 ' || RC=$?
-assert_eq "in-image layout: serve.py + executable binaries + collector-sidecar-notify files + baked INDEX, no baked ledger, no calendar json, non-root uid, HSCOLLECTOR_PYTHON=python3" \
+assert_eq "in-image layout: serve.py + supervisor + executable binaries + collector-sidecar-notify files + baked INDEX, no baked ledger, no calendar json, non-root uid, HSCOLLECTOR_PYTHON=python3" \
   0 "$RC"
 HOST_INDEX_SHA="$(sha256sum "$REPO_ROOT/calendars/CALENDAR_INDEX.sha256" \
   | cut -d' ' -f1)"

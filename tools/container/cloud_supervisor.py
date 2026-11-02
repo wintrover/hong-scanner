@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cloud_supervisor: the container's runtime supervisor (Northflank PR-4).
 
-Contract: tools/container/README.md §8. This process is an EXECUTION
+Contract: tools/container/README.md §7. This process is an EXECUTION
 ADAPTER and nothing more: it owns child-process lifecycle and session
 scheduling — it never judges the market (the Nim core is the judgment
 authority), never records a market fact (Collector/Recorder do), and
@@ -41,7 +41,7 @@ performs that role directly:
     at most one collector is ever active (single-threaded session
     control + the collector's own O_EXCL as the second line of defense).
 
-Probes (README §8.3) — the supervisor's OWN stdlib HTTP server, never
+Probes (README §7) — the supervisor's OWN stdlib HTTP server, never
 serve.py (the GET-only API contract stays untouched):
   /startup  503 until initialization completes (config + calendar
             volume verified against the baked image index + API child
@@ -56,7 +56,7 @@ serve.py (the GET-only API contract stays untouched):
   responsibility, and a post-close absence of collector/worker is
   normal, not a restart reason (probe contract A).
 
-Configuration is environment-only (README §8.2 table): every variable
+Configuration is environment-only (README §7 env table): every variable
 has a documented default matching the image layout. The supervisor's
 judgments are not recorded anywhere: its stdout (one SUPERVISOR-prefixed
 line per decision, KST timestamps) IS the container log; the market
@@ -220,7 +220,7 @@ class Config:
     calendar_dir: str = "/var/lib/hongscanner/calendars"
     calendar_index: str = "/opt/hongscanner/CALENDAR_INDEX.sha256"
     collector_bin: str = "/opt/hongscanner/bin/collector"
-    notify_script: str = "/opt/hongscanner/notify/notify_dispatcher.py"
+    notify_script: str = "/opt/hongscanner/tools/notify/notify_dispatcher.py"
     notify_config: str = "/var/lib/hongscanner/notify/notify_config.json"
     worker_python: str = sys.executable
     profile: str = "demo"
@@ -273,7 +273,7 @@ class Config:
             collector_bin=_env_abs(env, "HS_COLLECTOR_BIN",
                                    "/opt/hongscanner/bin/collector"),
             notify_script=_env_abs(env, "HS_NOTIFY_SCRIPT",
-                                   "/opt/hongscanner/notify/"
+                                   "/opt/hongscanner/tools/notify/"
                                    "notify_dispatcher.py"),
             notify_config=_env_abs(env, "HS_NOTIFY_CONFIG",
                                    "/var/lib/hongscanner/notify/"

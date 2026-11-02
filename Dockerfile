@@ -1,6 +1,9 @@
-# Hong Scanner single-container contract (Northflank Phase-0, PR-2):
-# one always-running process — the read-only API server
-# (tools/api/serve.py, contract: tools/api/README.md §1/§5).
+# Hong Scanner single-container contract (Northflank Phase-0, PR-2;
+# runtime supervisor PR-4): one always-running process — the cloud
+# runtime supervisor (tools/container/cloud_supervisor.py, contract:
+# tools/container/README.md §7), which itself starts and supervises the
+# read-only API server (tools/api/serve.py, contract:
+# tools/api/README.md §1/§5).
 #
 # Build context contract (tools/container/README.md §2): this Dockerfile
 # COPYs relative paths only. A Docker COPY can never reach outside the
@@ -9,6 +12,7 @@
 # files into a fresh directory first (mktemp) and passes THAT directory
 # as the context:
 #   Dockerfile · bin/hongscanner · bin/collector · tools/api/serve.py
+#   tools/container/cloud_supervisor.py
 #   tools/collector/sidecar.py · tools/collector/requirements.txt
 #   tools/notify/{notify_dispatcher,notify_config,notify_fcm,
 #                 notify_ledger}.py
@@ -68,6 +72,10 @@ COPY tools/notify/notify_config.py /opt/hongscanner/tools/notify/notify_config.p
 COPY tools/notify/notify_fcm.py /opt/hongscanner/tools/notify/notify_fcm.py
 COPY tools/notify/notify_ledger.py /opt/hongscanner/tools/notify/notify_ledger.py
 
+# PR-4 runtime supervisor (tools/container/README.md §7): the container
+# process. Standard library only — nothing is installed for it, ever.
+COPY tools/container/cloud_supervisor.py /opt/hongscanner/cloud_supervisor.py
+
 RUN pip install --no-cache-dir \
       -r /opt/hongscanner/tools/collector/requirements.txt
 
@@ -75,6 +83,17 @@ RUN pip install --no-cache-dir \
 # system fallbacks; the image pins the base interpreter explicitly so the
 # sidecar runs on the interpreter pip installed websockets==17.3 into.
 ENV HSCOLLECTOR_PYTHON=python3
+
+# Supervisor env pins (PR-4): exactly the cloud_supervisor.py defaults,
+# made explicit so the image surface carries its own wiring (README §7).
+# Platform-side env (Northflank Secret Group) may override these; that
+# is the documented override path, not a setup requirement.
+ENV HS_API_BIND=0.0.0.0 \
+    HS_API_PORT=8080 \
+    HS_SUPERVISOR_PROBE_PORT=8081 \
+    HS_DATA_ROOT=/var/lib/hongscanner \
+    HS_CALENDAR_DIR=/var/lib/hongscanner/calendars \
+    HS_CALENDAR_INDEX=/opt/hongscanner/CALENDAR_INDEX.sha256
 
 # Code lives under /opt/hongscanner, data under /var/lib/hongscanner:
 # runs/ and notify/ are persistent-volume mount points (README §5) and
@@ -92,18 +111,21 @@ RUN groupadd --system hongscanner \
 
 USER hongscanner
 WORKDIR /opt/hongscanner
-EXPOSE 8080
+EXPOSE 8080 8081
 STOPSIGNAL SIGTERM
 
-# Phase-0 CMD. PR-4 replaces it with the cloud_supervisor ENTRYPOINT;
-# the image layout (paths, user, volumes) is the stable surface.
-# --bind 0.0.0.0 is container-only behind the Northflank platform
-# ingress: this API has no authentication of its own, access control
-# for 0.0.0.0 is delegated to the platform ingress Basic Auth, and
-# direct internet exposure of a non-loopback bind is a contract
-# violation (tools/api/README.md §1/§5). Local operation keeps the
-# default 127.0.0.1.
-CMD ["python3", "/opt/hongscanner/serve.py", \
-     "--bind", "0.0.0.0", "--port", "8080", \
-     "--runs", "/var/lib/hongscanner/runs", \
-     "--ledger", "/var/lib/hongscanner/notify/ledger.hcj.jsonl"]
+# PR-4 ENTRYPOINT (tools/container/README.md §7): the cloud runtime
+# supervisor is the container process. It starts and restarts its
+# children — the API server (serve.py) always, the collector/notify
+# worker per KST session windows — and serves the Northflank probes
+# (/startup · /ready · /live) on 8081. STOPSIGNAL SIGTERM drains it:
+# the supervisor terminates its children and exits 0 (docker stop
+# contract, exercised by tests/test_container_contract.sh).
+#
+# The API child binds 0.0.0.0 (ENV HS_API_BIND above) — container-only
+# behind the Northflank platform ingress: this API has no
+# authentication of its own, access control for 0.0.0.0 is delegated to
+# the platform ingress Basic Auth, and direct internet exposure of a
+# non-loopback bind is a contract violation (tools/api/README.md §1/§5).
+# Local operation keeps the default 127.0.0.1.
+ENTRYPOINT ["python3", "/opt/hongscanner/cloud_supervisor.py"]

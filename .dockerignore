@@ -29,6 +29,9 @@ tools/notify/*
 !tools/notify/notify_config.py
 !tools/notify/notify_fcm.py
 !tools/notify/notify_ledger.py
+!tools/container
+tools/container/*
+!tools/container/cloud_supervisor.py
 !calendars
 calendars/*
 !calendars/CALENDAR_INDEX.sha256
