@@ -39,11 +39,11 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P6 | merge gate | classic protection + ruleset + CI-green direct-push probe | `GH013`, exit 1, main unchanged | DONE |
 | P7 | canonical main | `tools/build.sh` → 출력 경로의 `hongscanner doctor` | build commit equals current main, `DOCTOR RESULT=OK` | 역사적 증거만 있음; 현재 변경분 미검증 |
 | P8 | 합성 replay | 빌드 출력의 `hongscanner replay` + `verify` | `VERDICT MATCH provenance=OK`, exit 0 | 역사적 합성 증거만 있음; 현재 변경분 미검증 |
-| P9 | 실측 데이터 경로 | real session | `VERDICT MATCH provenance=OK` | BLOCKED(G2) |
-| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED(수집기는 PR #11 구현, 타이머·운영 전환 미구축) |
-| P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) |
+| P9 | 실측 데이터 경로 | real session | `VERDICT MATCH provenance=OK` | BLOCKED(G2) — 2026-11-02 라이브 관측 시작(라이브 WS 경로 확정·실데이터·FCM 실전송, 증거 로그); 아직 봉인(`session_end`+MATCH) 세션 없음 |
+| P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED — 상주 알림 워커·세션 런처는 PR #29(`d787b37`) 구현; systemd 서비스·운영 전환만 미구축 |
+| P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) — PH-1 (2) 관측 시도는 2026-11-02 INCOMPLETE로 종료(증거 로그) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 4회 실측 완료(2026-10-30, main `1908427`·`edc1b4a`·`342557d`·`4f732da`; `f4ad05c`는 attest 게이트 실패로 미설치 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 누적 11회 설치 성공·2회 attest 게이트 실패(`f4ad05c` 10-30·`97043fd` 11-02 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
 
 ### Evidence log (2026-10-29)
 
@@ -83,7 +83,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 
 | gate | observed |
 |---|---|
-| P9(사전) | **WS 프로브**: 금 23:44·토 09:34 KST 두 차례 `wss://mockapi.kiwoom.com:10000` opening handshake timeout(TCP+TLS는 금요일 프로브로 확인됨). **해외장 교차검증**: 금 23:44 KST 시점은 NYSE/Nasdaq(10:44 EDT 정규장)·LSE(14:44 GMT)·Xetra(15:44 CET) 전부 정규장 진행 중이었는데도 handshake 무응답 — "any-market-open 게이트" 가설 기각. 잔여 가설: KRX 거래시간 게이트(우세)·서버 결함. 판정은 월 08:30/09:0x 프로브 대비뿐. 증거: `runs/precheck-2026-10-31/{probe,overseas-crosscheck}.json`. **서브에이전트 문서조사(병렬)**: WS·REST 운영시간·주말·점검 창은 공식 문서 전무(NOT DOCUMENTED — 스펙 JSON 337 API·공식 GitHub·포털 3페이지·공지 SPA 0건). 키움 모의 시세 범위(NXT·미국 무료 실시간)는 DOCUMENTED, 모의↔실전 틱 충실도 동일성은 무문서 |
+| P9(사전) | **WS 프로브**: 금 23:44·토 09:34 KST 두 차례 `wss://mockapi.kiwoom.com:10000` opening handshake timeout(TCP+TLS는 금요일 프로브로 확인됨). **해소(11-02)**: 무응답의 근본 원인은 프로브 URL에 경로가 없었다는 것 — 서버는 루트 업그레이드에 응답하지 않고, 공식 경로는 `/api/dostk/websocket`이다(PR #30 `a660689`, kwcli SDK의 base+api_url 합성·ka10171~73 근거). 즉 10-31 무응답은 가용성 게이트가 아니라 프로브 결함이었다. **해외장 교차검증**: 금 23:44 KST 시점은 NYSE/Nasdaq(10:44 EDT 정규장)·LSE(14:44 GMT)·Xetra(15:44 CET) 전부 정규장 진행 중이었는데도 handshake 무응답 — "any-market-open 게이트" 가설 기각. 잔여 가설: KRX 거래시간 게이트(우세)·서버 결함. 판정은 월 08:30/09:0x 프로브 대비뿐. 증거: `runs/precheck-2026-10-31/{probe,overseas-crosscheck}.json`. **서브에이전트 문서조사(병렬)**: WS·REST 운영시간·주말·점검 창은 공식 문서 전무(NOT DOCUMENTED — 스펙 JSON 337 API·공식 GitHub·포털 3페이지·공지 SPA 0건). 키움 모의 시세 범위(NXT·미국 무료 실시간)는 DOCUMENTED, 모의↔실전 틱 충실도 동일성은 무문서 |
 | P9(token) | sidecar refresh_token 실경로: init→ready, 강제 회전→`{"ev":"token"}`, stop→exit 0. 실 `kiwoomcli auth refresh --profile wuyoni`(토큰 값은 어디에도 기록 안 함). 24h grant 확인 — 새 만료 일 09:44 KST, 월 08:30 init 자동재발급이 같은 검증된 subprocess 경로(600s buffer, fail-closed)를 통과. 증거: `runs/precheck-2026-10-31/refresh-token.json` |
 | P9(rest) | 실측 ka10027(모의 REST, page 1, 상승 방향, 토요일 장외): HTTP 200, `cont_yn="Y"`, next_key 존재, body 46,285 bytes, top-level `[pred_pre_flu_rt_upper, return_code, return_msg]`, **`return_code` 정수 0**(JSON integer), `return_msg` 문자열, 목록 200건. 원문 bytes는 /tmp에만 보존(저장소 반입 안 함). 공식 자료 내부 불일치(스키마 String vs 예제 정수 0)를 실측으로 해소 — vendor_input.nim 정수 파싱과 정합. 증거: `runs/precheck-2026-10-31/rest-body-shape.json` |
 | P3(ack) | PR #14(fix-ws-ack-return-code, merge `e88f6ea`): WS ack `return_code` 경화 — `tickwire.nim` `canonicalAckCode`(정수 또는 정규 숫자 문자열 "0"/"0001" 수용, 그 외 fail-closed) + `sidecar.py`에 SDK 규칙 이식(normalize_return_code, LOGIN ack `return_msg` 임베드 `CODE=NNNN`/`[NNNN:` auth 재시도). CI 2런(pull_request `41154138884`·push `41154134165`) 성공 + 각 로그에서 `ALL CONTRACT SUITES PASSED` 1회 실측. tickwire 69 checks·sidecar 27 tests |
@@ -130,6 +130,24 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | 정리 | flutter 워크트리 제거·브랜치 vs3-mobile-app 로컬+원격 삭제(본 문서 PR merge 후). release APK 50.8MB·keystore는 저장소 밖·gitignore(미커밋). 루트 hongscanner.md·./hongscanner 미변경(불변 규칙 준수) |
 
 한계(2026-11-02 새벽): 모바일 앱은 계약·합성 테스트·CI·release 서명 수준에서 검증됐다. 실기기 설치·FCM 실수신·Firebase 프로젝트 연동은 미실시(사용자 handoff 대기 — mobile/README.md 7단계 체크리스트). 앱의 FCM 토큰은 화면 표시 → 운영자가 `tools/notify` register CLI로 등록(앱에 쓰기 경로 없음). 라이브 WS 가용성·실장 관측(P9)·PH-1(P11)·운영 승인(P12)은 여전히 미실시. 모의투자 관측이 실전 승인이 아니라는 기존 문언 유지.
+
+### Evidence log (2026-11-02, 오전~저녁) — FCM 실기기 연동(#26~#28)·상주 알림 워커(#29)·라이브 WS 경로(#30)·REST 페이싱(#31/#32)·truncation 계약(#33)
+
+| gate | observed |
+|---|---|
+| 모바일(FCM) | PR #26(`b36438d`, firebase_messaging 17.x register/onRegistered 전환+handoff 감사 수정)·PR #27(`97043fd`, FcmPushService 연동, handoff 3–4단계). merge push: ci·mobile 전부 success(#26 ci `41365171169`·mobile `41365171168`; #27 ci `41375249160`·mobile `41375249153`). **#27의 attest `41375249185`는 실패 — `BUILD REFUSED: origin is not wintrover/hong-scanner`(fail-closed, 미설치)** → PR #28(`8e1f38b`, MainActivity 추가·canonical repo 고정)로 해소: 8e1f38b ci `41377299181`·mobile `41377299260`·attest `41377299196` 전부 success. 루트 hongscanner.md·./hongscanner 미변경 |
+| FCM(실기기·실전송) | 사용자 휴대폰(wuyoni-sm-g977n) 연결·APK 설치·알림 허용·실알림 표시 관측. 오전 실전송 2건 HTTP 200 ACCEPTED(provider_message_id `0:1793586953353610%2e19e6a12e19e6a1`·`0:1793587274008383%2e…`, dedup_suppressed=1). 기기 표시 실측: `dumpsys notification` numPostedByApp=1, tag `FCM-Notification:5882277959`. 기기 등록: 레지스트리 토큰 `eHrUEWnOSQC7f0S-5Qbn4N`(11:34:22). 전달 ledger(`~/.local/share/hongscanner/notify/delivery.hcj.jsonl`) 총 12건 ACCEPTED, 전부 attempts=1·provider_message_id 확보 — **PROVIDER_ACCEPTED≠실기기 표시 경계 유지, 표시는 별도 관측(dumpsys·사용자 확인)** |
+| VS-3(상주 워커) | PR #29(`d787b37`, notify-watch): `tools/notify/dispatcher.py --watch`(1초 폴·완성된 LF 라인만·재시작 전수 재탐색 event_id 멱등·백오프 중 신규 이벤트 논블로킹 처리·배치 ingest)·`tools/run_session.sh`(세션 런처 — Collector+Worker 동시 기동·transient 관리·달력 절대경로·notify-config 사본)·collector fsync-before-publish(이벤트 공개 전 원본 입력 fsync). 근거: 오전 관측 "수집이 다 끝나야 알림" — 일회성 CLI 실행 주체 부재(ingest 실행 주체 UNKNOWN 해소). 게이트 `/tmp/gate-notify-watch.log` exit 0+마커. watch 드릴 `runs/drill-watch-20261102-133335`(4시나리오). CI 2런(pull_request `41390111109`·push `41390042671`) 마커 각 1. **attach 실측 `runs/attach-worker-20261102-1353`: 병합 워커가 라이브 PH-1 (2) events 파일 tail — 첫 틱 1,746-이벤트 백로그 ingest, 이후 ~20초 이벤트 쌍이 1초 폴 내 ingest(observed_at→ingest 0–1초, 중앙값 0초, n=20), 171틱, SIGTERM 정지 exit 0** |
+| P13(d787b37) | main `d787b37`(PR #29 merge) push: ci `41390719711`·attest `41390719697` success. INSTALL VERIFY OK → `versions/0.1.0-main-d787b37`(sha256 `2a67b63e…`), current 원자 전환. smoke `runs/smoke-2026-11-02-d787b37`: `REPLAY OK bars=22 signals=8 events=1 frames=24`·`VERDICT MATCH provenance=OK`·`EVENTS=6a51940f…` exit 0 — 5빌드 교차 결정론 유지 |
+| WS 경로(#30) | **라이브 WS 최초 연결 확정**: 세션 -c(14:58, `9707d2c` pre-merge) — `wss://mockapi.kiwoom.com:10000/api/dostk/websocket` 접속, LOGIN ACK return_code=0·conn open·서버 PING 수신·0s/0B REG ACK, REST ka10027 실데이터(상승: 영광 +32.35% 등, 하락: CJ씨푸드1우 −48.00% 등). 근본원인: 수거체가 경로 없이 루트에 접속(루트 업그레이드 무응답; TCP·TLS1.3·Kiwoom EV 인증서는 정상) — 공식 kwcli SDK는 `base+api_url` 합성, ka10171~73이 `/api/dostk/websocket` 사용. 14:40 라이브 LOGIN 프로브도 pre-merge로 성공(clean close 1000). PR #30(`a660689`, sidecar `DEMO_WS_ENDPOINT`+Nim `demoWsEndpoint`+fakesite expected 동기). CI 2런(`41396140493`·`41396197632`) 마커 각 1. -c의 FCM 3건 200(event 48e0f249·011fd251·a479daa2, 14:58) — **수집 세션 도중 실시간 전송 관측** |
+| REST 429(#31/#32) | -c/-d에서 up p2를 1초 내 재요청 → HTTP 429 `return_code=5` "허용된 요청 개수를 초과…유량=1, API ID=ka10027"(모의투자 "TR 1초 1회", 공지 #49). PR #31(`84217ca`): sidecar `_pace_rest()` 잠금 직렬화·최소 간격 강제(rest_min_interval). 1.0초에서도 -d up p2 429 재발(도착 지터로 서버 창보다 짧아질 수 있음) → PR #32(`0b1a474`): 1.5초 마진. 세션 -d(15:19, main 84217ca): down 체인 7페이지 연속 200(아이디스·코아시아씨엠·국일신동·NPC우·TIGER 글로벌자원생산기업·폴라리스AI핸디), FCM 3건 200(299d93bc·07cc9bfa·f9384724). 세션 -e(15:26, `a6cabe9` pre-merge): **up 10페이지 전부 200·429 0건**. CI 마커: #31 `41398641077`·`41398730580`, #32 `41400151639`·`41400244587` 각 1 |
+| truncation(#33) | -e가 page cap 10 도달+cont-yn=Y → 구현이 초기 체인 truncation으로 18초 만에 exit 4 INCOMPLETE. 라이브 실측 확정: **벤더가 양방향 상한 초과 반환** — 현행대로면 PH-1 세션이 구조적으로 초기에 사망. 이는 문서 계약 위반(§12.1/GATES: 초과분은 "미조회", 상한은 스캐너 선언) → PR #33(`bded2d4`): cap-closed 체인을 **선언된 truncated 부분집합**으로 소비 — vendor_input `truncatedOk`(호출자 소유 선언, 기본값 기존 거부 유지·below-cap Y·실패 페이지는 불가), collector 초기 체인 진행(gap 기록→다리 전환→도출→REG), rest_resp 감사 수용(페이지 검증), event_gen 무판정 소비(부분 유니버스는 후보 이벤트 없음 — REST_TRUNCATED HIGH/INCOMPLETE가 사실 담당). 게이트 exit 0+마커(1,553 checks), 스트림 종단 테스트 8건 추가(seal→replay OK→20페이지 검증→REST_TRUNCATED 2→후보 이벤트 0→verify MATCH). CI 2런(`41407502571`·`41407496879`) 마커 각 1. -e의 FCM 4건 200(deb11a87·20877264 외 2, 15:26) |
+| P13(bded2d4) | main `bded2d4`(PR #33 merge) push: ci `41407827865`(마커 1)·attest `41407827876` success. `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `bded2d4bd36b22bc9c8ddfac3ae29b7724f11b75`·github-hosted-only) → `versions/0.1.0-main-bded2d4`(sha256 `327b2a2d12468e72dfdcfcd98512cfe5113056a498de1e170d02918977336dba`), current 원자 전환. smoke `runs/smoke-2026-11-02-bded2d4`: `REPLAY OK bars=22 signals=8 events=1 frames=24`·`VERDICT MATCH provenance=OK`·`EVENTS=6a51940f…` exit 0 — **6빌드(0b065bf·885b009·ee53e93·c4afd4f·d787b37·bded2d4) 교차 결정론**(이벤트 해시 동일), run.json code_commit == `bded2d4…` |
+| PH-1 (2) | 09:01:46 시작·15:40 watchdog 종료. 구동 빌드는 WS 경로 결함 포함(수거체 연결이 매 20초 실패 쌍: ws_conn 1,193·gap 1,194, REST 0건, 입력 2,389줄·events 2,388 — CHECKSUMS·run.json 없는 미봉인 상태로 보존). 종료 계약 정직 동작: "COLLECTOR INCOMPLETE: watchdog 15:40:00+09:00 reached without close evidence (FID 215 in {4,8})". 설치 바이너리(bded2d4) replay: `REPLAY INCOMPLETE: session_end missing` **exit 4**. **수동 래퍼의 `COLLECTOR_EXIT=0`은 파이프 뒤 tail의 종료 코드 — 수거체 실측 exit 아님(알려진 버그 패턴, run_session.sh에서는 수정됨 — 최종 보고에 명시)** |
+| 세션 replay | 설치 바이너리로 -c/-d/-e 입력 replay: -c·-d **exit 2 REJECT**(`rest_resp at seq 8 … HTTP status 429` — 429 실패 페이지가 증거로 기록된 체인, fail-closed·그날 증거로 보존), -e **exit 4 INCOMPLETE**(session_end 없음; **cap-closed 10페이지 체인이 새 감사를 통과 — REJECT 아님**, truncation 계약 변경의 라이브 데이터 검증). 증거 `runs/ph1-2026-11-02-{a,b,c,d,e}`(+launcher log·notify-config 사본) main 트리 runs/ 보존. -b는 exit 2(워크트리 달력 상대경로 오류 — gitignored calendars, 증거 보존) |
+| 정리 | notify-watch 워크트리 드릴 증거 5건(drill-fcm 2·drill-watch 3) main runs/로 복사 보존. **agent-37 사고**: 서브에이전트가 첫 게이트를 워크트리가 아닌 메인 트리에서 실행(build/hongscanner 재빌드 — gitignored, 보존) — PH-1 (2) 수거체 무영향 확인(collector mtime 08:30 무손상·입력 파일 무결), 잔류물 `runs/drill-fcm-20261102-130012` 보존. wsfix·notify-watch·gates 워크트리는 본 문서 PR merge 후 정리(브랜치 로컬+원격 삭제) |
+
+한계(2026-11-02 오전~저녁): 라이브 관측이 시작됐지만 봉인(`session_end`) 세션은 아직 없다 — P9는 BLOCKED 유지. 세션 -c/-d/-e는 pre-merge 프로브와 merge 직후 혼재이며 canonical 전일 세션은 11-03(화) 실측 대기. FCM 실기기 표시는 dumpsys·사용자 확인으로 관측했으나 도착 시각·순서·중복의 SLA는 여전히 무보장(UNKNOWN 그대로). REST_TRUNCATED는 poll마다 발화할 수 있어(벤더가 양방향 상한 초과) 전일 세션에서 HIGH 푸시 빈도가 오를 수 있음 — min_severity 정책(현재 세션용 HIGH)은 사용자 결정 항목. 푸시 지연 분포(이벤트 기록→FCM POST)·strace fsync 순서·라이브 세션의 replay 일치는 11-03 실측 예정. 수동 래퍼 pipe-exit 버그·StartLimit 후 failed 잔류 등 운영 잔여는 최종 보고에 명시.
 
 ## Completion Evidence
 
@@ -203,7 +221,9 @@ sidecar + collector core)가 계약 스위트와 함께 구현·merge됐다. 단
   유래이며, 교정에 쓴 세션의 신호는 검출 증거로 함께 쓸 수 없다.
 - **PH-2(평가)**: 동결된 config로 PH-1과 별개 세션을 실행한다. 결과는
   `signals observed` 또는 `NO_TRIGGER_OBSERVED` 둘 중 하나다.
-- 둘 다 BLOCKED(G2) — 실측 경로가 없다.
+- 둘 다 BLOCKED(G2) — 실측 연결 경로는 2026-11-02부터 존재한다(라이브 WS
+  접속·실데이터 관측·세션 -c~-e·PH-1 (2), 증거 로그)만 봉인된 실측
+  세션(`session_end`+`VERDICT MATCH`)은 아직 없다.
 
 ## Approval — `session_end`와 별개 조건 (목표 계약)
 
