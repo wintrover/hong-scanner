@@ -2,9 +2,9 @@
 ## Minimal atomic install path for the GitHub-attested binary (GATES.md P13).
 ##
 ## Verifies a downloaded hongscanner binary by delegating entirely to
-## `gh attestation verify`, pinned to: repo wintrover/hong-scanner, signer
+## `gh attestation verify`, pinned to: repo wintrover/hongscanner, signer
 ## workflow .github/workflows/attest.yml (gh's [host/]<owner>/<repo>/<path>
-## form: wintrover/hong-scanner/.github/workflows/attest.yml), source ref
+## form: wintrover/hongscanner/.github/workflows/attest.yml), source ref
 ## refs/heads/main, the exact source digest given as an argument, and
 ## GitHub-hosted runners only (--deny-self-hosted-runners). This script never
 ## reimplements, replaces or fakes any part of attestation verification: if
@@ -68,8 +68,8 @@ set -euo pipefail
 umask 022 # dirs 0755, files 0644: no group/other-writable paths even under umask 000/002
 set -C    # O_EXCL on shell redirections: never write through an existing path or symlink
 
-readonly REPO="wintrover/hong-scanner"
-readonly SIGNER_WORKFLOW="wintrover/hong-scanner/.github/workflows/attest.yml"
+readonly REPO="wintrover/hongscanner"
+readonly SIGNER_WORKFLOW="wintrover/hongscanner/.github/workflows/attest.yml"
 readonly SOURCE_REF="refs/heads/main"
 
 usage() {

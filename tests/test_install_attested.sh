@@ -23,7 +23,7 @@
 ## "binary" so the copy/hash window is wide enough to land in reliably.
 ##
 ## Real GitHub attestation verification (`gh attestation verify` against
-## wintrover/hong-scanner with signer workflow .github/workflows/attest.yml,
+## wintrover/hongscanner with signer workflow .github/workflows/attest.yml,
 ## ref refs/heads/main, the exact source digest of main, GitHub-hosted
 ## runners only) is NOT performed here: it requires the real gh, the real
 ## attest.yml workflow and a real attested binary, and is executed by the
@@ -226,9 +226,9 @@ H1="$(hash_of "$B1")"
 RC=0; OUT="$(run_install "$B1" 1.0.0 "$DIGEST" "$ROOT" 2>&1)" || RC=$?
 assert_eq "successful install exits 0" 0 "$RC"
 assert_contains "reports the pinned verification" "$OUT" "INSTALL VERIFY OK"
-assert_contains "verify line pins the repo" "$OUT" "repo=wintrover/hong-scanner"
+assert_contains "verify line pins the repo" "$OUT" "repo=wintrover/hongscanner"
 assert_contains "verify line pins the signer workflow" "$OUT" \
-  "signer=wintrover/hong-scanner/.github/workflows/attest.yml"
+  "signer=wintrover/hongscanner/.github/workflows/attest.yml"
 assert_contains "verify line pins the ref" "$OUT" "ref=refs/heads/main"
 assert_contains "verify line pins the source digest" "$OUT" "source_digest=$DIGEST"
 assert_contains "reports INSTALL OK with the version" "$OUT" "INSTALL OK version=1.0.0"
@@ -237,9 +237,9 @@ assert_contains "records the verified binary's actual sha256" "$OUT" "sha256=$H1
 LASTCALL="$(tail -n 1 "$GHLOG")"
 assert_contains "gh is called as attestation verify" "$LASTCALL" "attestation verify"
 assert_contains "gh verifies the artifact file itself" "$LASTCALL" "$B1"
-assert_contains "gh is pinned to the repo" "$LASTCALL" "--repo wintrover/hong-scanner"
+assert_contains "gh is pinned to the repo" "$LASTCALL" "--repo wintrover/hongscanner"
 assert_contains "gh is pinned to the signer workflow" "$LASTCALL" \
-  "--signer-workflow wintrover/hong-scanner/.github/workflows/attest.yml"
+  "--signer-workflow wintrover/hongscanner/.github/workflows/attest.yml"
 assert_contains "gh is pinned to refs/heads/main" "$LASTCALL" "--source-ref refs/heads/main"
 assert_contains "gh is pinned to the exact source digest" "$LASTCALL" "--source-digest $DIGEST"
 assert_contains "gh rejects self-hosted runners" "$LASTCALL" "--deny-self-hosted-runners"
@@ -263,9 +263,9 @@ assert_eq "PROVENANCE is not group/other-writable" 644 "$(mode_of "$VDIR/PROVENA
 assert_eq "installed binary is 0755" 755 "$(mode_of "$VDIR/hongscanner")"
 
 PROV="$(cat "$VDIR/PROVENANCE.txt")"
-assert_contains "provenance pins the repo" "$PROV" "repo=wintrover/hong-scanner"
+assert_contains "provenance pins the repo" "$PROV" "repo=wintrover/hongscanner"
 assert_contains "provenance pins the signer workflow" "$PROV" \
-  "signer_workflow=wintrover/hong-scanner/.github/workflows/attest.yml"
+  "signer_workflow=wintrover/hongscanner/.github/workflows/attest.yml"
 assert_contains "provenance pins the source ref" "$PROV" "source_ref=refs/heads/main"
 assert_contains "provenance pins the exact source digest" "$PROV" "source_digest=$DIGEST"
 assert_contains "provenance restricts to GitHub-hosted runners" "$PROV" "github-hosted-only"

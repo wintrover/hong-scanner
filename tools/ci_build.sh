@@ -31,7 +31,7 @@
 ##                           CI_BUILD_OUT="$(mktemp -d)".
 ##
 ## Guards (each refuses the build, exit 1):
-##   origin remote is wintrover/hong-scanner (public repo, so the anonymous
+##   origin remote is wintrover/hongscanner (public repo, so the anonymous
 ##     https fetch below needs no credentials),
 ##   clean tree -- untracked files count as dirty, exactly like tools/build.sh,
 ##   HEAD == CI_BUILD_SHA,
@@ -73,9 +73,9 @@ if ! origin_url="$(git remote get-url origin 2>/dev/null)"; then
   exit 1
 fi
 case "$origin_url" in
-  *github.com[:/]wintrover/hong-scanner|*github.com[:/]wintrover/hong-scanner.git) ;;
+  *github.com[:/]wintrover/hongscanner|*github.com[:/]wintrover/hongscanner.git) ;;
   *)
-    echo "BUILD REFUSED: origin is not wintrover/hong-scanner: $origin_url" >&2
+    echo "BUILD REFUSED: origin is not wintrover/hongscanner: $origin_url" >&2
     exit 1
     ;;
 esac
