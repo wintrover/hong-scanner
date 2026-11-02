@@ -54,6 +54,31 @@ class PushMessage {
 /// 15.x major). Queue-discard recovery is therefore guaranteed by the
 /// startup and foreground-resume resync paths instead of a callback —
 /// documented in mobile/README.md.
+/// Token-registration capability for a wired push service.
+///
+/// firebase_messaging 17.x replaced `getToken()`/`onTokenRefresh` with the
+/// FID registration APIs (`register()`/`onRegistered`): registration is
+/// initiated, then the Firebase Installation ID (FID) arrives
+/// asynchronously on the stream — there is no direct "fetch current token"
+/// call anymore. Kept separate from [PushService] for the same reason as
+/// [PushMessageSource]: the no-wired default never fakes a registration
+/// stream.
+///
+/// The scaffold contract is unchanged: the app only *displays* the
+/// identifier; registering it with the server is the operator's
+/// `tools/notify/register` CLI step (mobile/README.md).
+abstract interface class PushTokenSource {
+  /// Initiates FCM registration for this app instance. Completes once
+  /// registration has been initiated; the FID itself is delivered via
+  /// [onRegistered].
+  Future<void> register();
+
+  /// FIDs delivered when registration completes (and whenever the
+  /// installation id changes). The value is what the Overview push card
+  /// shows the operator — the app has no write path to the server.
+  Stream<String> get onRegistered;
+}
+
 abstract interface class PushMessageSource {
   /// Messages received while the app is in the foreground. With
   /// notification+data messages the OS does not display the notification
@@ -77,9 +102,6 @@ abstract class PushService {
 
   /// Whether the underlying push infrastructure is wired and usable.
   bool get isReady;
-
-  /// Returns the push token, or null when no token is available.
-  Future<String?> getToken();
 
   /// Requests permission to show notifications.
   ///

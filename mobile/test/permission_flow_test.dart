@@ -16,24 +16,55 @@ void main() {
   test('first run with granted decision: asked once, recorded, phase granted',
       () async {
     final kv = MemoryKeyValueStore();
-    final push = FakePushService(
+    final push = FakeTokenPushService(
         ready: true,
         decision: PushPermissionDecision.granted,
-        token: 'fcm-token-abc');
+        fid: 'fcm-fid-abc');
     final store = makeStore(
         transport: fixtureTransport(), push: push, kv: kv);
     await store.bootstrap();
 
     expect(push.askCount, 1, reason: 'first run auto-asks exactly once');
+    expect(push.registerCount, 1,
+        reason: 'a ready token source registers exactly once per bootstrap');
     expect(store.pushState.phase, PushPhase.granted);
     expect(store.pushState.askedCount, 1);
     expect(store.pushState.lastResponse, PushPermissionDecision.granted);
-    expect(store.pushState.token, 'fcm-token-abc');
+    expect(store.pushState.token, 'fcm-fid-abc',
+        reason: 'the FID delivered via onRegistered is display-only');
 
     final record = await PushPermissionLedger(store: kv).load();
     expect(record.askedCount, 1);
     expect(record.lastResponse, PushPermissionDecision.granted);
     expect(record.lastAskedAt, DateTime(2026, 11, 2, 9));
+  });
+
+  test('register() failure surfaces an honest error, not a fake token',
+      () async {
+    final push = FakeTokenPushService(
+        ready: true,
+        registerError: StateError('registration failed at the plugin'));
+    final store = makeStore(
+        transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(push.registerCount, 1);
+    expect(store.pushState.token, isNull);
+    expect(store.pushState.tokenError, contains('토큰 획득 실패'));
+    expect(store.pushState.tokenError, contains('registration failed'));
+  });
+
+  test('ready service without a token source shows no token and no error',
+      () async {
+    final push = FakePushService(
+        ready: true, decision: PushPermissionDecision.granted);
+    final store = makeStore(
+        transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+
+    expect(store.pushState.token, isNull);
+    expect(store.pushState.tokenError, isNull,
+        reason: 'nothing was delivered and nothing failed — no invented state');
   });
 
   test('denied decision: app keeps working, push shown disabled', () async {
@@ -139,5 +170,21 @@ void main() {
     expect(find.text('푸시 비활성 — 권한 거부됨'), findsOneWidget);
     expect(find.text('다시 요청'), findsOneWidget);
     expect(find.textContaining('요청 이력: 1회'), findsOneWidget);
+  });
+
+  testWidgets('the delivered FID renders in full — copyable, not truncated',
+      (WidgetTester tester) async {
+    // FID-scale length (~150 chars): a 60-char prefix would visibly cut it.
+    final fid = 'fcm-${'a1B2c3D4' * 18}x';
+    final push = FakeTokenPushService(
+        ready: true, decision: PushPermissionDecision.granted, fid: fid);
+    final store =
+        makeStore(transport: fixtureTransport(), push: push, kv: MemoryKeyValueStore());
+    await store.bootstrap();
+    await tester.pumpWidget(HongScannerApp(store: store));
+
+    expect(find.textContaining(fid), findsOneWidget,
+        reason: 'the operator registers exactly the displayed identifier — '
+            'a truncated prefix would be a broken registration');
   });
 }

@@ -150,6 +150,7 @@ class AppStore extends ChangeNotifier {
 
   StreamSubscription<PushMessage>? _tapSub;
   StreamSubscription<PushMessage>? _foregroundSub;
+  StreamSubscription<String>? _fidSub;
   void Function(PushMessage message)? onForegroundMessage;
 
   static const int detailTabIndex = 2;
@@ -196,7 +197,7 @@ class AppStore extends ChangeNotifier {
     if (record.neverAsked) {
       await requestPushPermission();
     }
-    await _loadToken();
+    await _wireTokenSource();
     _wirePushRouting();
   }
 
@@ -248,24 +249,40 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _loadToken() async {
+  /// Wires the token-registration flow (firebase_messaging 17.x FID
+  /// APIs). Subscribes [PushTokenSource.onRegistered] *before* calling
+  /// [PushTokenSource.register] so the delivered FID cannot race the
+  /// listener, and shows exactly what the source delivered: no FID means
+  /// no token on the card, never a fabricated one. The identifier is
+  /// display-only — the operator registers it with the server CLI.
+  Future<void> _wireTokenSource() async {
     if (!_push.isReady) {
       pushState = pushState.copyWith(
           tokenError: '푸시 미연결 — Firebase 미설정 (mobile/README.md 참조)');
       notifyListeners();
       return;
     }
+    final tokenSource =
+        _push is PushTokenSource ? _push as PushTokenSource : null;
+    if (tokenSource == null) return;
+    _fidSub = tokenSource.onRegistered.listen(
+      (fid) {
+        pushState = pushState.copyWith(token: fid, clearTokenError: true);
+        notifyListeners();
+      },
+      onError: (Object e) {
+        // Keep any previously delivered FID; the error is surfaced, not
+        // swallowed and not mistaken for a token.
+        pushState = pushState.copyWith(tokenError: '토큰 획득 실패: $e');
+        notifyListeners();
+      },
+    );
     try {
-      final token = await _push.getToken();
-      pushState = pushState.copyWith(
-        token: token,
-        clearTokenError: true,
-        tokenError: token == null ? '토큰 없음 — Firebase 설정 후 재시도' : null,
-      );
+      await tokenSource.register();
     } on Object catch (e) {
       pushState = pushState.copyWith(tokenError: '토큰 획득 실패: $e');
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   void _wirePushRouting() {
@@ -413,6 +430,7 @@ class AppStore extends ChangeNotifier {
     _disposed = true;
     _tapSub?.cancel();
     _foregroundSub?.cancel();
+    _fidSub?.cancel();
     _api.close();
     super.dispose();
   }

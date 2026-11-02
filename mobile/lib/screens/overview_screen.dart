@@ -311,7 +311,9 @@ class _TokenArea extends StatelessWidget {
           const SizedBox(height: 4),
           if (token != null)
             SelectableText(
-              token.length > 60 ? '${token.substring(0, 60)}…' : token,
+              // Full value, never truncated: the operator copies exactly
+              // this identifier into tools/notify/notify_register.py.
+              token,
               style: Theme.of(context).textTheme.bodySmall,
             )
           else

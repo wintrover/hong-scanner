@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Firebase provisioning is downloaded per developer from the Firebase
+# console and must never be committed (mobile/README.md handoff step 1).
+google-services.json

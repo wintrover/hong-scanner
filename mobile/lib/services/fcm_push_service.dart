@@ -10,7 +10,12 @@ import 'push_service.dart';
 /// false and every call throws [StateError] instead of reporting success.
 /// The app ships with [NoopPushService] until the Firebase handoff
 /// (mobile/README.md) swaps the composition point.
-class FcmPushService implements PushService, PushMessageSource {
+///
+/// Token acquisition uses the firebase_messaging 17.x FID registration
+/// APIs: [register] initiates registration and the Firebase Installation
+/// ID arrives on [onRegistered] ([PushTokenSource]) — the deprecated
+/// `getToken()`/`onTokenRefresh` surface is not used.
+class FcmPushService implements PushService, PushMessageSource, PushTokenSource {
   const FcmPushService();
 
   bool get _wired => Firebase.apps.isNotEmpty;
@@ -24,12 +29,15 @@ class FcmPushService implements PushService, PushMessageSource {
   bool get isReady => _wired;
 
   @override
-  Future<String?> getToken() {
+  Future<void> register() {
     if (!_wired) _throwUnwired();
-    // Scaffold contract pins getToken(); 17.x deprecates it in favor of
-    // register()/onRegistered — migrate during the Firebase handoff.
-    // ignore: deprecated_member_use
-    return FirebaseMessaging.instance.getToken();
+    return _messaging.register();
+  }
+
+  @override
+  Stream<String> get onRegistered {
+    if (!_wired) _throwUnwired();
+    return FirebaseMessaging.instance.onRegistered;
   }
 
   @override

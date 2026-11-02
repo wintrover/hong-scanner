@@ -8,17 +8,18 @@ import 'package:hongscanner/services/push_service.dart';
 void main() {
   group('NoopPushService', () {
     test(
-        'is a no-op: not ready, no token, permission answers nothing-was-asked',
+        'is a no-op: not ready, no token registration, permission answers nothing-was-asked',
         () async {
       final PushService service = const NoopPushService();
 
       expect(service.isReady, isFalse);
-      expect(await service.getToken(), isNull);
       expect(await service.requestPermission(), isNull);
     });
 
-    test('does not implement PushMessageSource (no fake streams)', () {
+    test('does not implement PushMessageSource or PushTokenSource (no fakes)',
+        () {
       expect(const NoopPushService(), isNot(isA<PushMessageSource>()));
+      expect(const NoopPushService(), isNot(isA<PushTokenSource>()));
     });
   });
 
@@ -33,7 +34,11 @@ void main() {
     test('fails closed when used before Firebase.initializeApp', () {
       const FcmPushService service = FcmPushService();
 
-      expect(() => service.getToken(), throwsStateError);
+      expect(service, isA<PushTokenSource>(),
+          reason:
+              'token registration uses the 17.x register()/onRegistered APIs');
+      expect(() => service.register(), throwsStateError);
+      expect(() => service.onRegistered, throwsStateError);
       expect(() => service.requestPermission(), throwsStateError);
     });
 
