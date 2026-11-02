@@ -1,0 +1,20 @@
+# Build-context whitelist (tools/container/README.md §2/§4): the staged
+# context carries only what the Dockerfile COPYs — the Dockerfile, the
+# hongscanner binary, serve.py and the calendar INDEX. Everything else
+# is excluded. In particular the real calendars/*.json are gitignored
+# user data and never enter an image or a build context; only the
+# git-tracked calendars/CALENDAR_INDEX.sha256 passes.
+*
+!Dockerfile
+!.dockerignore
+!bin
+bin/*
+!bin/hongscanner
+!tools
+tools/*
+!tools/api
+tools/api/*
+!tools/api/serve.py
+!calendars
+calendars/*
+!calendars/CALENDAR_INDEX.sha256
