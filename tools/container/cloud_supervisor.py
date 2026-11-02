@@ -204,7 +204,7 @@ def _env_hhmm(env, key, default):
 @dataclass
 class Config:
     """Everything the supervisor may be configured with, env-overridable,
-    each with the documented default (README §8.2)."""
+    each with the documented default (README §7.4)."""
 
     data_root: str = "/var/lib/hongscanner"
     serve_script: str = "/opt/hongscanner/serve.py"
@@ -318,7 +318,7 @@ class Config:
 
 def verify_calendar_volume(index_path, calendar_dir):
     """Cross-validate the volume-supplied calendar JSONs against the
-    image's baked CALENDAR_INDEX.sha256 (tools/container/README.md §4/§8).
+    image's baked CALENDAR_INDEX.sha256 (tools/container/README.md §4/§7).
     Returns (calendars, faults): calendars is a list of
     {"path", "doc"} entries for the files that matched; faults is a
     list of reason strings — any fault is fail-closed (the session
@@ -709,7 +709,7 @@ class ProbeServer:
     """The supervisor's own stdlib HTTP server — separate port,
     separate process from serve.py, whose GET-only contract is never
     touched. The three paths and the port are env-configurable
-    (README §8.2/§8.3); the Northflank mapping itself is deployment
+    (README §7.4/§7.2); the Northflank mapping itself is deployment
     configuration (NF-5 guide in the README), not a repository file."""
 
     def __init__(self, supervisor):
