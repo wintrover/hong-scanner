@@ -293,6 +293,14 @@ core가 Recorder의 단일 작성자로서 쓰는 레코드(seq = 기록 순서)
 | REST 실패(전송 실패·non-200·본문 미성립) | `gap`(symbol null, api_id/direction/page/what/detail — §7) |
 | 세션 정상 종료 | `recorder.finish()` — seal + COMMITTED 마커 |
 
+내구성 순서(syncNow): 레코드 자체는 이벤트 없는 틱이 압도적이므로 60초
+하트비트로만 syncNow 된다. 이벤트가 발행될 때마다는 이벤트 append 전에
+입력 로그를 syncNow로 강제 동기화한다(푸시된 사실의 근거는 내구성이
+확인된 뒤에만 공개 — REPLAY_CONTRACT §13.2). syncNow가 실패하면 1회
+즉시 재시도하고, 재시도도 실패하면 이벤트를 공개하지 않고 세션은
+INCOMPLETE로 보존·종료된다(exit 4). session_end 봉인 경로는 finish()의
+durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 밖이다.
+
 ### 6.1 config 레코드 (PH-1 승인값 전부 기록)
 
 ```json
@@ -345,7 +353,8 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
   `recorder.finish()`(seal+COMMITTED 마커) → `stop` → sidecar exit 0 →
   **collector exit 0**.
 - **INCOMPLETE(정직한 실패)**: watchdog까지 {4,8} 무관측 / ack 실패·타임아웃
-  (시작 REG·teardown REMOVE 포함) / 기록 실패 / sidecar 내부 결함 →
+  (시작 REG·teardown REMOVE 포함) / 기록 실패 / 이벤트 공개 전 입력 로그
+  fsync 실패(재시도 후에도) / sidecar 내부 결함 →
   **finish() 호출 금지**(seal 없음 = verify가 INCOMPLETE로 판정) →
   파일 보존 → `recorder.abandon()`(이미 닫혀 있으면 생략) → `stop`(가능하면)
   → **collector exit 4**.

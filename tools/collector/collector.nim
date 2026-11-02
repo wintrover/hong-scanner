@@ -3,8 +3,10 @@
 ## Owns the sidecar process and the Recorder; the judgment authority is
 ## src/hs/collector.nim (one sidecar line in, records + directives out).
 ## This file adds the adapter-boundary pieces the core must not have: the
-## subprocess, the record file, the 60 s syncNow heartbeat and the exit
-## codes (README §8):
+## subprocess, the record file, the 60 s syncNow heartbeat, the input-log
+## fsync that precedes every event publication (REPLAY_CONTRACT §13.2:
+## evidence is durable before the event that cites it is published) and
+## the exit codes (README §8):
 ##   0  normal — drain_done -> recorder.finish() (seal + COMMITTED marker)
 ##      -> stop -> sidecar exit 0;
 ##   2  usage or pipe-protocol violation — nothing is sealed, the file is
@@ -145,7 +147,8 @@ type
     ## The live event journal (REPLAY_CONTRACT §13): every judged fact
     ## appended in judgment order, each as one complete canonical HCJ
     ## line + LF, strictly AFTER its evidence record exists in
-    ## input.hcj.jsonl (record-first, §13.2). The journal is derived
+    ## input.hcj.jsonl and that evidence's fsync has succeeded
+    ## (record-first, §13.2). The journal is derived
     ## evidence: a crash loses nothing that replaying the recorded
     ## stream cannot reconstruct, so it carries the recorder's
     ## exclusive-creation and complete-line discipline but no seal
@@ -275,33 +278,12 @@ proc main(): int =
   defer:
     closeEventsLog(elog)
 
-  # The single judgment function (REPLAY_CONTRACT §13.1): every record
-  # the recorder has numbered is fed to it in recorder seq order
-  # (§13.3), and the judged facts are appended to the journal in
-  # judgment order. Replay folds the very same function over the same
-  # records; there is no second judgment.
   var egen = initEventGenState()
 
-  proc judge(kind: Kind; raw: HcjValue; seqNo: int) =
-    let r = Record(seq: seqNo, kind: kind, raw: raw)
-    let (s2, evs) = step(egen, r)
-    egen = s2
-    for f in evs:
-      elog.appendEvent(eventLine(f))
-
-  proc sealEvents() =
-    ## The end-of-stream judgment (event_gen.finish): SESSION_INCOMPLETE
-    ## on an honest incomplete exit; a no-op once the stream is sealed.
-    ## Best effort on failure paths only — the input log is the
-    ## authoritative evidence and replay reconstructs the journal.
-    try:
-      for f in finish(egen):
-        elog.appendEvent(eventLine(f))
-    except CatchableError:
-      discard
-
   # Launch the sidecar (no shell): its stderr stays ours for diagnosis; its
-  # stdout is the event pipe, its stdin the command pipe.
+  # stdout is the event pipe, its stdin the command pipe. Declared before
+  # the judgment machinery so judge (below) can reach preserveAndExit,
+  # which shuts this process down on every failure path.
   let p = startProcess(pythonCmd(), args = @[sidecarScript()],
                        options = {poUsePath})
   defer:
@@ -318,6 +300,70 @@ proc main(): int =
       true
     except CatchableError:
       false
+
+  var stopSent = false
+
+  proc sealEvents() =
+    ## The end-of-stream judgment (event_gen.finish): SESSION_INCOMPLETE
+    ## on an honest incomplete exit; a no-op once the stream is sealed.
+    ## Best effort on failure paths only — the input log is the
+    ## authoritative evidence and replay reconstructs the journal.
+    try:
+      for f in finish(egen):
+        elog.appendEvent(eventLine(f))
+    except CatchableError:
+      discard
+
+  template preserveAndExit(code: int; msg: string) {.dirty.} =
+    sealEvents()
+    try:
+      rec.abandon()
+    except CatchableError:
+      discard
+    if not stopSent:
+      discard send(Directive(kind: dkStop).directiveLine())
+    try:
+      p.inputStream().close()
+    except CatchableError:
+      discard
+    let sc = p.peekExitCode()
+    if sc == -1:
+      discard p.waitForExit()
+    fail(code, msg)
+
+  # The single judgment function (REPLAY_CONTRACT §13.1): every record
+  # the recorder has numbered is fed to it in recorder seq order
+  # (§13.3), and the judged facts are appended to the journal in
+  # judgment order. Replay folds the very same function over the same
+  # records; there is no second judgment. It is declared after
+  # preserveAndExit so a failed pre-publication fsync can take that
+  # shared failure path.
+  proc judge(kind: Kind; raw: HcjValue; seqNo: int) =
+    let r = Record(seq: seqNo, kind: kind, raw: raw)
+    let (s2, evs) = step(egen, r)
+    egen = s2
+    # Durability before publication (§13.2): the notification worker
+    # consumes an appended event moments after it lands, so the input
+    # bytes the event was judged from must be fsynced first — a power
+    # failure must never leave "the push went out, its evidence did not".
+    # Event-less records, the overwhelming majority, stay on the 60 s
+    # heartbeat alone, and the seal's judgment runs after finish(),
+    # whose durable-completion protocol has already fsynced the whole
+    # log (rec.finished()). syncNow changes no byte and poisons nothing,
+    # so one immediate retry is safe; if that fails too, the event is
+    # never published and the session is preserved and ends INCOMPLETE.
+    if evs.len > 0 and not rec.finished():
+      try:
+        rec.syncNow()
+      except RecorderError as e:
+        stderr.writeLine("COLLECTOR sync failed (no byte changed): " & e.msg)
+        try:
+          rec.syncNow()
+        except RecorderError:
+          preserveAndExit(4, "COLLECTOR INCOMPLETE: input fsync failed " &
+            "before event publication")
+    for f in evs:
+      elog.appendEvent(eventLine(f))
 
   var c = startCollector(cfg)
   try:
@@ -345,24 +391,6 @@ proc main(): int =
 
   var reader = PipeReader(fd: p.outputHandle())
   var nextSync = epochTime() + 60.0
-  var stopSent = false
-
-  template preserveAndExit(code: int; msg: string) {.dirty.} =
-    sealEvents()
-    try:
-      rec.abandon()
-    except CatchableError:
-      discard
-    if not stopSent:
-      discard send(Directive(kind: dkStop).directiveLine())
-    try:
-      p.inputStream().close()
-    except CatchableError:
-      discard
-    let sc = p.peekExitCode()
-    if sc == -1:
-      discard p.waitForExit()
-    fail(code, msg)
 
   while not stopSent:
     let now = epochTime()
