@@ -16,9 +16,12 @@ The three discriminations this process does make (README §4, all of them):
   2. LOGIN — one handshake per connection; an auth-class ack
      ({8005, 8031, 8103}) triggers one token refresh and one retry, the
      same strategy as the official SDK.
-  3. Token expiry — the cache's expires_at is the only expiry evidence;
-     600 s buffer, re-read after `kiwoomcli auth refresh --profile <alias>`.
-     Token values exist only in process memory: nothing prints them.
+  3. Token expiry — expires_dt/expires_at is the only expiry evidence;
+     600 s buffer. Credentials come from `kiwoomcli auth refresh --profile
+     <alias>` (token_source "kiwoomcli", the default), or — when the init
+     line carries token_source "env" (README §5.1) — from a direct OAuth
+     issuance with APP_KEY_MOCK/APP_SECRET_MOCK. Token values and
+     credential values exist only in process memory: nothing prints them.
 
 Wire discipline (README §1): line-delimited UTF-8 JSON over stdin/stdout,
 one object per line. Every emitted line is HCJ-safe (string/int values
@@ -45,6 +48,10 @@ PROTOCOL = 1
 KST = timezone(timedelta(hours=9))
 DEMO_REST_DOMAIN = "https://mockapi.kiwoom.com"
 DEMO_WS_ENDPOINT = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+# The official OAuth issuance path (README §5.1). Only the env token
+# source uses it; the endpoint is derived from the pinned demo domain —
+# never from the wire.
+OAUTH_TOKEN_PATH = "/oauth2/token"
 REST_PATH = "/api/dostk/rkinfo"
 TOKEN_BUFFER_SECONDS = 600
 # The auth-class LOGIN ack codes (README §2.2): one refresh + one retry.
@@ -119,8 +126,9 @@ def parse_watchdog_seconds(text):
 
 def parse_init(line):
     """Validate the `init` instruction (README §2.1). Every field is
-    required; the approved PH-1 values are pinned here too — this sidecar
-    refuses to run a configuration the contract does not approve."""
+    required except the optional token_source (README §5.1); the approved
+    PH-1 values are pinned here too — this sidecar refuses to run a
+    configuration the contract does not approve."""
     try:
         cfg = json.loads(line)
     except ValueError:
@@ -148,6 +156,12 @@ def parse_init(line):
     if not isinstance(profile, str) or not 1 <= len(profile) <= 64 or \
        any(c.isspace() for c in profile):
         raise SidecarExit(4, "profile alias must be 1..64 non-space chars")
+    # token_source is OPTIONAL (README §5.1): absent or "kiwoomcli" keeps
+    # the kiwoomcli credential path exactly as it was — an init line that
+    # does not carry the field must not change any behavior.
+    source = cfg.get("token_source", "kiwoomcli")
+    if source not in ("kiwoomcli", "env"):
+        raise SidecarExit(4, "init token_source must be kiwoomcli or env")
     params = cfg.get("rest_params")
     if not isinstance(params, dict):
         raise SidecarExit(4, "init rest_params must be an object")
@@ -227,17 +241,157 @@ class TokenStore:
         return entry[0], entry[1]
 
 
+class EnvTokenProvider:
+    """The env credential path (README §5.1, token_source="env"): read
+    APP_KEY_MOCK / APP_SECRET_MOCK from the process environment and POST
+    the official OAuth client_credentials request directly. The response's
+    expires_dt ("YYYYMMDDHHMMSS", KST absolute) is the only expiry
+    evidence — no fixed validity period is documented. The token lives in
+    this process's memory: no log, no stderr, no record, no file, no exit
+    report ever carries it, and neither do the exception messages (they
+    name the failure class only).
+
+    The endpoint is a constructor parameter so the contract tests can
+    point it at a local fake server; the live sidecar derives it from the
+    pinned demo domain. The init-line rest_domain guard in parse_init is
+    never relaxed by this path.
+    """
+
+    def __init__(self, endpoint, clock=time.time, timeout=30,
+                 max_attempts=2):
+        self.endpoint = endpoint
+        self.clock = clock
+        self.timeout = timeout
+        # au10001 allows roughly two issuances per second (README §5.1):
+        # one issuance and at most one failure retry per get() — the
+        # token is reused from memory until the 600 s buffer is reached,
+        # never reissued per request.
+        self.max_attempts = max_attempts
+        self._token = None
+        self._token_type = "Bearer"
+        self._expires_epoch = 0.0
+
+    def _credentials(self):
+        """The env credentials. Missing or empty is a refusal that names
+        the variable — there is no value to name and none is printed."""
+        appkey = os.environ.get("APP_KEY_MOCK", "")
+        secretkey = os.environ.get("APP_SECRET_MOCK", "")
+        if not appkey:
+            raise TokenError("APP_KEY_MOCK missing or empty in environment")
+        if not secretkey:
+            raise TokenError(
+                "APP_SECRET_MOCK missing or empty in environment")
+        return appkey, secretkey
+
+    def _issue(self):
+        """One OAuth issuance. Standard JSON parsing only (the official
+        response is JSON — the doc example's missing comma is a typo, not
+        a format). Every failure is a TokenError carrying the failure
+        class only: no credential value, no token value, no vendor
+        return_msg text, no request or response body ever echoed."""
+        appkey, secretkey = self._credentials()
+        body = json.dumps({
+            "grant_type": "client_credentials",
+            "appkey": appkey,
+            "secretkey": secretkey,
+        }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        req = urllib.request.Request(
+            self.endpoint, data=body, method="POST",
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except Exception as exc:
+            # An HTTP error status is still no issuance: fail-closed with
+            # the failure class only (the error response is never parsed).
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()  # do not leak the error response's socket
+            raise TokenError("token endpoint request failed: "
+                             + type(exc).__name__)
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise TokenError("token endpoint returned non-JSON")
+        if not isinstance(doc, dict):
+            raise TokenError("token endpoint response is not a JSON object")
+        code = normalize_return_code(doc.get("return_code"))
+        if code is None:
+            raise TokenError(
+                "token endpoint response has no usable return_code")
+        if code != 0:
+            # Every issuance failure lands here (including the token-IP
+            # binding error 8010, README §5.1). The numeric code is not a
+            # secret; the return_msg text is never repeated into it.
+            raise TokenError("token endpoint returned return_code=%d" % code)
+        token = doc.get("token")
+        if not isinstance(token, str) or not token:
+            raise TokenError(
+                "token endpoint response has no usable token field")
+        token_type = doc.get("token_type")
+        if not isinstance(token_type, str) or not token_type:
+            token_type = "Bearer"
+        expires_dt = doc.get("expires_dt")
+        if not isinstance(expires_dt, str):
+            raise TokenError(
+                "token endpoint response has no usable expires_dt")
+        try:
+            expires_epoch = datetime.strptime(
+                expires_dt, "%Y%m%d%H%M%S").replace(tzinfo=KST).timestamp()
+        except ValueError:
+            # Unparseable expiry is fail-closed: there is no documented
+            # validity period to fall back to.
+            raise TokenError(
+                "token endpoint response has no usable expires_dt")
+        return token, token_type, expires_epoch
+
+    def get(self, force=False):
+        """(token, token_type) whose remaining life exceeds the 600 s
+        buffer: the cached issuance while it lasts, one reissue when the
+        buffer is reached or force is set, at most max_attempts HTTP
+        attempts, then TokenError (no token value in any message)."""
+        if (not force and self._token is not None and
+                self._expires_epoch - self.clock() > TOKEN_BUFFER_SECONDS):
+            return self._token, self._token_type
+        last = TokenError("token issue failed")
+        for _ in range(self.max_attempts):
+            try:
+                token, token_type, expires_epoch = self._issue()
+            except TokenError as exc:
+                last = exc
+                continue
+            if expires_epoch - self.clock() <= TOKEN_BUFFER_SECONDS:
+                # Never hand out a token the renewal window already
+                # covers — the kiwoomcli path refuses the same case.
+                raise TokenError(
+                    "issued token expires_dt is inside the renewal buffer")
+            self._token = token
+            self._token_type = token_type
+            self._expires_epoch = expires_epoch
+            return token, token_type
+        raise last
+
+
 class Sidecar:
     """One collector session's communication state machine."""
 
     def __init__(self, cfg, repoll=300, drain=10, ack_timeout=10,
-                 rest_min_interval=1.5):
+                 rest_min_interval=1.5, token_endpoint=None):
         self.cfg = cfg
         self.ws_endpoint = cfg["ws_endpoint"]
         self.rest_domain = cfg["rest_domain"]
         self.api_id = cfg["api_id"]
         self.rest_params = cfg["rest_params"]
-        self.store = TokenStore(cfg["profile"])
+        source = cfg.get("token_source", "kiwoomcli")
+        if source == "env":
+            # README §5.1: the env path derives its endpoint from the
+            # pinned demo domain in production; the constructor parameter
+            # exists only so the contract tests can point it at a local
+            # fake server. The init-line rest_domain guard in parse_init
+            # is never relaxed by this path.
+            self.store = EnvTokenProvider(
+                token_endpoint or DEMO_REST_DOMAIN + OAUTH_TOKEN_PATH)
+        else:
+            self.store = TokenStore(cfg["profile"])
         # Durations are constructor parameters so the contract tests can
         # shrink them; parse_init pins the approved live values.
         self.repoll = repoll
@@ -653,7 +807,7 @@ class RestError(Exception):
     """A REST transport failure (no HTTP response at all)."""
 
 
-def main():
+def main(token_endpoint=None):
     line = sys.stdin.readline()
     if not line:
         raise SidecarExit(4, "stdin closed before init")
@@ -661,7 +815,9 @@ def main():
     repoll = cfg["repoll_seconds"]
     drain = cfg["drain_seconds"]
     ack_timeout = cfg["ack_timeout_seconds"]
-    sidecar = Sidecar(cfg, repoll=repoll, drain=drain, ack_timeout=ack_timeout)
+    sidecar = Sidecar(cfg, repoll=repoll, drain=drain,
+                      ack_timeout=ack_timeout,
+                      token_endpoint=token_endpoint)
 
     async def runner():
         try:

@@ -7,7 +7,10 @@ websockets module: no live API call, no real network, no credential
 value ever printed. The token path is exercised through the real
 TokenStore with a seeded local token cache and a fake `kiwoomcli`
 executable on PATH, so the subprocess boundary is the real one and only
-the credential values are fixtures.
+the credential values are fixtures. The token_source="env" path
+(README §5.1) runs against a real local HTTP server on 127.0.0.1 (an
+ephemeral port) with the endpoint injected through the provider
+constructor — likewise no live API call.
 
 Run: bash tools/collector/test_sidecar.sh — it resolves a Python 3.13
 interpreter, bootstraps tools/collector/.venv with requirements.txt,
@@ -37,6 +40,31 @@ import sidecar  # noqa: E402
 TOKEN = "SECRET-TOKEN-VALUE"
 FRESH_TOKEN = "REFRESHED-TOKEN"
 TOKEN_TYPE = "Bearer"
+# The token_source="env" fixtures (README §5.1). Fake values; the suite
+# runner greps its own output for every fixture secret below and fails
+# if any of them ever reaches it.
+ENV_APP_KEY = "FAKE-ENV-APPKEY-VALUE"
+ENV_APP_SECRET = "FAKE-ENV-SECRET-VALUE"
+ENV_TOKEN = "FAKE-ENV-TOKEN-1"
+ENV_TOKEN_2 = "FAKE-ENV-TOKEN-2"
+ENV_TOKEN_3 = "FAKE-ENV-TOKEN-3"
+ENV_SECRET_FIXTURES = ("TOKEN", "FRESH_TOKEN", "ENV_APP_KEY",
+                       "ENV_APP_SECRET", "ENV_TOKEN", "ENV_TOKEN_2",
+                       "ENV_TOKEN_3")
+
+
+def patch_environ(testcase, key, value):
+    """Set an env var for the test and restore it afterwards."""
+    old = os.environ.get(key)
+    os.environ[key] = value
+
+    def restore():
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+
+    testcase.addCleanup(restore)
 
 
 def kst_now():
@@ -94,6 +122,74 @@ def install_fake_kiwoomcli(bin_dir, cache_dir, exit_code=0):
         f.write("exit %d\n" % exit_code)
     os.chmod(script, 0o755)
     return script
+
+
+class FakeTokenServer:
+    """A real local HTTP server on 127.0.0.1 (ephemeral port) scripted to
+    answer the OAuth token path (README §5.1 tests). Deterministic: each
+    scripted entry is either a dict (HTTP 200 with that JSON body) or a
+    (status, bytes) tuple; when the script is exhausted the server serves
+    a plain return_code!=0 JSON so a test can never pass on an unscripted
+    response. Requests are recorded (method, path, headers, parsed body);
+    the socket never leaves loopback and no live host is contacted."""
+
+    def __init__(self, testcase, script):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        self.recorded = []
+        scripted = list(script)
+        recorded = self.recorded
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # keep the suite output clean
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or "0")
+                raw = self.rfile.read(length)
+                try:
+                    body = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    body = None
+                recorded.append({
+                    "method": self.command,
+                    "path": self.path,
+                    "content_type": self.headers.get("Content-Type") or "",
+                    "authorization": self.headers.get("Authorization"),
+                    "body": body,
+                })
+                entry = scripted.pop(0) if scripted else \
+                    {"return_code": 1, "return_msg": "script exhausted"}
+                if isinstance(entry, tuple):
+                    status, payload = entry
+                else:
+                    status, payload = 200, \
+                        json.dumps(entry).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type",
+                                 "application/json;charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.endpoint = "http://127.0.0.1:%d%s" % (self.port,
+                                                   sidecar.OAUTH_TOKEN_PATH)
+        testcase.addCleanup(self._stop)
+        self._thread = threading.Thread(target=self.server.serve_forever,
+                                        daemon=True)
+        self._thread.start()
+
+    def _stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def env_expires_dt(epoch):
+    """An official expires_dt string for an epoch second (KST absolute,
+    "YYYYMMDDHHMMSS")."""
+    return datetime.fromtimestamp(epoch, sidecar.KST).strftime(
+        "%Y%m%d%H%M%S")
 
 
 class FakeStdin:
@@ -200,7 +296,8 @@ class Harness:
 
     def __init__(self, testcase, ack_timeout=0.5, drain=0.2, repoll=3600,
                  watchdog="23:59:59+09:00", token=TOKEN,
-                 rest_min_interval=0.0):
+                 rest_min_interval=0.0, token_source=None,
+                 token_endpoint=None):
         self.testcase = testcase
         self.stdin = FakeStdin()
         self.stdout = Capture()
@@ -208,12 +305,18 @@ class Harness:
         sys.stdin, sys.stdout = self.stdin, self.stdout
         cfg = approved_cfg()
         cfg["watchdog"] = watchdog
+        if token_source is not None:
+            cfg["token_source"] = token_source
         self.cfg = cfg
         self.sc = sidecar.Sidecar(cfg, repoll=repoll, drain=drain,
                                   ack_timeout=ack_timeout,
-                                  rest_min_interval=rest_min_interval)
-        self.sc.token = token
-        self.sc.token_type = TOKEN_TYPE
+                                  rest_min_interval=rest_min_interval,
+                                  token_endpoint=token_endpoint)
+        # The default pre-set token is the kiwoomcli path's shortcut; the
+        # env path (token=None) must go through the real provider.
+        if token is not None:
+            self.sc.token = token
+            self.sc.token_type = TOKEN_TYPE
         self.task = None
         self.fake_ws = None
         self.connect_calls = []
@@ -333,6 +436,32 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg["api_id"], "ka10027")
         self.assertEqual(sorted(cfg["rest_params"]),
                          sorted(sidecar.REST_PARAMS_FIELDS))
+
+    def test_init_token_source_is_optional_and_pinned(self):
+        # Absent: the kiwoomcli default — no behavior may change for an
+        # init line that does not carry the field (README §5.1).
+        cfg = sidecar.parse_init(json.dumps(approved_cfg()))
+        self.assertEqual(cfg.get("token_source", "kiwoomcli"), "kiwoomcli")
+        self.assertIsInstance(sidecar.Sidecar(cfg).store, sidecar.TokenStore)
+        # Explicit "kiwoomcli" selects the same store; "env" selects the
+        # env provider with the pinned demo endpoint when none is injected.
+        cfg = approved_cfg()
+        cfg["token_source"] = "kiwoomcli"
+        self.assertIsInstance(sidecar.Sidecar(cfg).store,
+                              sidecar.TokenStore)
+        cfg["token_source"] = "env"
+        sc = sidecar.Sidecar(cfg)
+        self.assertIsInstance(sc.store, sidecar.EnvTokenProvider)
+        self.assertEqual(sc.store.endpoint,
+                         sidecar.DEMO_REST_DOMAIN +
+                         sidecar.OAUTH_TOKEN_PATH)
+        # Every other value (including a non-string) is refused.
+        for bad in ("native", "", None, 3):
+            line = approved_cfg()
+            line["token_source"] = bad
+            with self.assertRaises(sidecar.SidecarExit) as cm:
+                sidecar.parse_init(json.dumps(line))
+            self.assertEqual(cm.exception.code, 4)
 
     def test_init_rejects_every_unapproved_value(self):
         def mutate(**changes):
@@ -864,6 +993,114 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(e.get("ev") == "error" and
                             e.get("what") == "token" for e in evs))
 
+    # ------------------------------------------------ token_source="env"
+
+    def test_main_env_missing_credentials_refuse_to_start(self):
+        # Fail-closed (README §5.1): no env credentials, no start — and
+        # no HTTP request at all.
+        server = FakeTokenServer(self, [])
+        h = self.harness()
+        cfg = approved_cfg()
+        cfg["token_source"] = "env"
+        h.send(**cfg)
+        result = {}
+
+        def run_main():
+            result["code"] = sidecar.main(token_endpoint=server.endpoint)
+
+        thread = threading.Thread(target=run_main)
+        thread.start()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive(), "main did not return")
+        self.assertEqual(result["code"], 3)
+        evs = h.events()
+        err = [e for e in evs if e.get("ev") == "error"][-1]
+        self.assertEqual(err["what"], "token")
+        self.assertEqual(err["detail"],
+                         "APP_KEY_MOCK missing or empty in environment")
+        self.assertEqual(len(server.recorded), 0,
+                         "no issuance request without credentials")
+
+    def test_main_env_return_code_failure_retries_once_then_exits_three(self):
+        server = FakeTokenServer(self, [
+            {"return_code": 1, "return_msg": "credential not valid"},
+            {"return_code": 1, "return_msg": "credential not valid"},
+        ])
+        h = self.harness()
+        patch_environ(self, "APP_KEY_MOCK", ENV_APP_KEY)
+        patch_environ(self, "APP_SECRET_MOCK", ENV_APP_SECRET)
+        cfg = approved_cfg()
+        cfg["token_source"] = "env"
+        h.send(**cfg)
+        result = {}
+
+        def run_main():
+            result["code"] = sidecar.main(token_endpoint=server.endpoint)
+
+        thread = threading.Thread(target=run_main)
+        thread.start()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive(), "main did not return")
+        self.assertEqual(result["code"], 3)
+        evs = h.events()
+        err = [e for e in evs if e.get("ev") == "error"][-1]
+        self.assertEqual(err["what"], "token")
+        self.assertEqual(err["detail"],
+                         "token endpoint returned return_code=1")
+        self.assertEqual(len(server.recorded), 2,
+                         "exactly one retry before the failure")
+        # The failure report carries the failure class only.
+        joined = "\n".join(h.stdout.lines)
+        for secret in (ENV_APP_KEY, ENV_APP_SECRET, ENV_TOKEN):
+            self.assertNotIn(secret, joined)
+        self.assertNotIn("credential not valid", joined)
+
+    async def test_env_source_acquires_via_the_provider_and_never_leaks(self):
+        server = FakeTokenServer(self, [
+            {"token": ENV_TOKEN, "token_type": "bearer",
+             "expires_dt": env_expires_dt(float(int(time.time())) + 3600.0),
+             "return_code": 0, "return_msg": ""},
+            {"token": ENV_TOKEN_2, "token_type": "bearer",
+             "expires_dt": env_expires_dt(float(int(time.time())) + 3600.0),
+             "return_code": 0, "return_msg": ""},
+        ])
+        patch_environ(self, "APP_KEY_MOCK", ENV_APP_KEY)
+        patch_environ(self, "APP_SECRET_MOCK", ENV_APP_SECRET)
+        # token=None: the env path must go through the real provider,
+        # never the kiwoomcli shortcut.
+        h = self.harness(token=None, token_source="env",
+                         token_endpoint=server.endpoint)
+        h.attach_fake_websockets()
+        await h.start()
+        # The startup acquisition is a real env round trip.
+        h.sc.acquire_token()
+        self.assertEqual(h.sc.token, ENV_TOKEN)
+        self.assertEqual(h.sc.token_type, "bearer")
+        self.assertEqual(len(server.recorded), 1)
+        await h.login()
+        login = json.loads(h.fake_ws.sent[0])
+        self.assertEqual(login["token"], ENV_TOKEN)
+        # Forced rotation (refresh_token, README §2.5): one more issuance.
+        h.send(type="refresh_token")
+        await h.wait_for(
+            lambda evs: any(e.get("ev") == "token" for e in evs),
+            "the token event after the forced reissue")
+        self.assertEqual(h.sc.token, ENV_TOKEN_2)
+        self.assertEqual(len(server.recorded), 2)
+        h.fake_ws.deliver(b"PING")
+        await h.wait_for(
+            lambda evs: any(e.get("payload_hex") == b"PING".hex()
+                            for e in evs), "a forwarded payload")
+        self.assertEqual(await h.stop_and_join(), 0)
+        # No secret anywhere in the sidecar's emitted lines.
+        joined = "\n".join(h.stdout.lines)
+        for secret in (ENV_APP_KEY, ENV_APP_SECRET, ENV_TOKEN, ENV_TOKEN_2):
+            self.assertNotIn(secret, joined)
+        self.assertNotIn("authorization", joined.lower())
+        # ... and no token file on disk: the env path writes nothing.
+        self.assertFalse(os.path.exists(token_cache_path(self.cache_dir)),
+                         "env mode must not write a token cache")
+
     # ---------------------------------------------------------- privacy
 
     async def test_no_token_value_ever_reaches_the_pipe(self):
@@ -894,6 +1131,196 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(TOKEN, joined)
         self.assertNotIn(FRESH_TOKEN, joined)
         self.assertNotIn("Bearer", joined)
+
+
+class EnvTokenProviderContract(unittest.TestCase):
+    """README §5.1: the token_source="env" provider against a real local
+    fake HTTP server on 127.0.0.1 — the official request shape, response
+    parsing, the 600 s renewal trigger, and the fail-closed paths. The
+    endpoint is injected; no live host is ever contacted."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.tmp = tmp
+        self.addCleanup(tmp.cleanup)
+        patch_environ(self, "APP_KEY_MOCK", ENV_APP_KEY)
+        patch_environ(self, "APP_SECRET_MOCK", ENV_APP_SECRET)
+
+    def test_env_issuance_parses_the_official_response(self):
+        expires = float(int(time.time())) + 3600.0
+        server = FakeTokenServer(self, [{
+            "token": ENV_TOKEN, "token_type": "bearer",
+            "expires_dt": env_expires_dt(expires),
+            "return_code": "0", "return_msg": ""}])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 1,
+                         "au10001: one issuance, the token is reused")
+        req = server.recorded[0]
+        self.assertEqual(req["method"], "POST")
+        self.assertEqual(req["path"], sidecar.OAUTH_TOKEN_PATH)
+        self.assertEqual(req["content_type"].split(";")[0],
+                         "application/json")
+        self.assertIsNone(req["authorization"],
+                          "the issuance request carries no Authorization")
+        self.assertEqual(req["body"],
+                         {"grant_type": "client_credentials",
+                          "appkey": ENV_APP_KEY,
+                          "secretkey": ENV_APP_SECRET})
+        # expires_dt is the only expiry evidence: parsed as a KST absolute.
+        self.assertEqual(provider._expires_epoch, expires)
+        # The cached issuance serves later gets without a new request.
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 1)
+
+    def test_env_reissue_triggers_only_inside_the_600s_buffer(self):
+        t0 = 1_000_000.0
+        clock = {"now": t0}
+        server = FakeTokenServer(self, [
+            {"token": ENV_TOKEN, "token_type": "bearer",
+             "expires_dt": env_expires_dt(t0 + 3600.0),
+             "return_code": 0, "return_msg": ""},
+            {"token": ENV_TOKEN_2, "token_type": "bearer",
+             "expires_dt": env_expires_dt(t0 + 10000.0),
+             "return_code": 0, "return_msg": ""},
+            {"token": ENV_TOKEN_3, "token_type": "bearer",
+             "expires_dt": env_expires_dt(t0 + 20000.0),
+             "return_code": 0, "return_msg": ""},
+        ])
+        provider = sidecar.EnvTokenProvider(server.endpoint,
+                                            clock=lambda: clock["now"])
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 1)
+        clock["now"] = t0 + 2999.0   # remaining 601 s: outside the buffer
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 1,
+                         "no reissue while the buffer is not reached")
+        clock["now"] = t0 + 3001.0   # remaining 599 s: inside the buffer
+        self.assertEqual(provider.get(), (ENV_TOKEN_2, "bearer"))
+        self.assertEqual(len(server.recorded), 2,
+                         "the buffer crossing triggered one reissue")
+        clock["now"] = t0 + 1001.0   # far from expiry again
+        self.assertEqual(provider.get(force=True), (ENV_TOKEN_3, "bearer"))
+        self.assertEqual(len(server.recorded), 3,
+                         "force reissues even with a usable cache")
+
+    def test_env_missing_or_empty_credentials_refuse(self):
+        server = FakeTokenServer(self, [])
+        for missing in ("APP_KEY_MOCK", "APP_SECRET_MOCK"):
+            for key, value in (("APP_KEY_MOCK", ENV_APP_KEY),
+                               ("APP_SECRET_MOCK", ENV_APP_SECRET)):
+                if key != missing:
+                    os.environ[key] = value
+            os.environ.pop(missing, None)
+            provider = sidecar.EnvTokenProvider(server.endpoint)
+            with self.assertRaises(sidecar.TokenError) as cm:
+                provider.get()
+            self.assertIn(missing, str(cm.exception))
+            self.assertNotIn(ENV_APP_KEY, str(cm.exception))
+            self.assertNotIn(ENV_APP_SECRET, str(cm.exception))
+            self.assertEqual(len(server.recorded), 0,
+                             "no request without both credentials")
+        # An empty string value is the same refusal as a missing one.
+        os.environ["APP_KEY_MOCK"] = ENV_APP_KEY
+        os.environ["APP_SECRET_MOCK"] = ""
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertIn("APP_SECRET_MOCK", str(cm.exception))
+        self.assertEqual(len(server.recorded), 0)
+
+    def test_env_return_code_failure_retries_once_then_raises(self):
+        server = FakeTokenServer(self, [
+            {"return_code": 1, "return_msg": "credential not valid"},
+            {"return_code": 1, "return_msg": "credential not valid"},
+        ])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertEqual(str(cm.exception),
+                         "token endpoint returned return_code=1")
+        self.assertNotIn("credential not valid", str(cm.exception))
+        self.assertEqual(len(server.recorded), 2,
+                         "one failure retry, then the error")
+
+    def test_env_retry_recovers_a_transient_failure(self):
+        server = FakeTokenServer(self, [
+            {"return_code": 1, "return_msg": "transient"},
+            {"token": ENV_TOKEN, "token_type": "bearer",
+             "expires_dt": env_expires_dt(float(int(time.time())) + 3600.0),
+             "return_code": 0, "return_msg": ""},
+        ])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 2)
+
+    def test_env_non_json_response_fails_closed(self):
+        server = FakeTokenServer(self, [(200, b"<html>not json</html>"),
+                                        (200, b"<html>not json</html>")])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertEqual(str(cm.exception),
+                         "token endpoint returned non-JSON")
+        self.assertNotIn(ENV_APP_KEY, str(cm.exception))
+        self.assertNotIn(ENV_APP_SECRET, str(cm.exception))
+        self.assertEqual(len(server.recorded), 2)
+
+    def test_env_http_error_status_fails_closed(self):
+        server = FakeTokenServer(self, [(500, b"{}"), (500, b"{}")])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertEqual(str(cm.exception),
+                         "token endpoint request failed: HTTPError")
+        self.assertEqual(len(server.recorded), 2)
+
+    def test_env_issuance_inside_the_buffer_is_refused(self):
+        server = FakeTokenServer(self, [{
+            "token": ENV_TOKEN, "token_type": "bearer",
+            "expires_dt": env_expires_dt(float(int(time.time())) + 300.0),
+            "return_code": 0, "return_msg": ""}])
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertEqual(
+            str(cm.exception),
+            "issued token expires_dt is inside the renewal buffer")
+        self.assertEqual(len(server.recorded), 1,
+                         "no retry on an unusable expiry")
+
+    def test_env_unusable_fields_fail_closed(self):
+        good_expires = env_expires_dt(float(int(time.time())) + 3600.0)
+        cases = [
+            ({"token_type": "bearer", "expires_dt": good_expires,
+              "return_code": 0},
+             "token endpoint response has no usable token field"),
+            ({"token": "", "token_type": "bearer",
+              "expires_dt": good_expires, "return_code": 0},
+             "token endpoint response has no usable token field"),
+            ({"token": ENV_TOKEN, "token_type": "bearer",
+              "return_code": 0},
+             "token endpoint response has no usable expires_dt"),
+            ({"token": ENV_TOKEN, "token_type": "bearer",
+              "expires_dt": "2026-99-99", "return_code": 0},
+             "token endpoint response has no usable expires_dt"),
+            ({"token": ENV_TOKEN, "token_type": "bearer",
+              "expires_dt": good_expires},
+             "token endpoint response has no usable return_code"),
+            ({"token": ENV_TOKEN, "token_type": "bearer",
+              "expires_dt": good_expires, "return_code": "OK"},
+             "token endpoint response has no usable return_code"),
+            ([], "token endpoint response is not a JSON object"),
+        ]
+        for doc, message in cases:
+            server = FakeTokenServer(
+                self, [(200, json.dumps(doc).encode("utf-8"))] * 2)
+            provider = sidecar.EnvTokenProvider(server.endpoint)
+            with self.assertRaises(sidecar.TokenError) as cm:
+                provider.get()
+            self.assertEqual(str(cm.exception), message, doc)
+            self.assertNotIn(ENV_APP_KEY, str(cm.exception))
+            self.assertNotIn(ENV_APP_SECRET, str(cm.exception))
 
 
 if __name__ == "__main__":

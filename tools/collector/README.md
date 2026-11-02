@@ -93,6 +93,10 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
   "프로토콜 1단계 정적 한계"로 선언, §5 표에 명시된 값에서 유도 —
   config 레코드에 그 사실과 함께 기록), `watchdog`=15:40 KST(스캐너 시계,
   마감 권위 아님).
+- `token_source`(선택): `"kiwoomcli"`(기본) | `"env"`. 미지정이면 무엇도
+  바뀌지 않는다 — §5의 kiwoomcli 캐시 경로가 그대로 쓰인다. `"env"`면
+  sidecar가 APP_KEY_MOCK·APP_SECRET_MOCK 환경변수로 공식 OAuth 엔드포인트에
+  직접 발급한다(§5.1). 그 외 값은 시작 거부(exit 4)다.
 - sidecar는 토큰을 여기서 확보한다(§5). 성공 시 `ready`, 실패 시
   `error(what=token)` 후 exit 3.
 
@@ -266,7 +270,8 @@ sidecar 소유 시계)를 가진다.
 2. **LOGIN**: 접속 후 1회 송신, ack `return_code`로 접속 성립만 판정.
    auth 계열 실패 시 재발급+1회 재시도. 내용은 기록하지 않는다(core가
    ws_raw로 기록한다).
-3. **토큰 만료**: 캐시 `expires_at`이 유일한 만료 근거(agent-89i8jq2u:
+3. **토큰 만료**: 캐시 `expires_at`(kiwoomcli 경로, §5) 또는 OAuth 응답의
+   `expires_dt`(env 경로, §5.1)가 유일한 만료 근거(agent-89i8jq2u:
    expires_dt 유일 만료 근거·재발급=재호출·8010 IP 바인딩). 기준은
    공식 SDK와 같은 600초 버퍼. 토큰 값은 어디에도 출력되지 않는다.
 
@@ -294,6 +299,49 @@ sidecar 소유 시계)를 가진다.
   (재시도 1회 후 `error what=token`, exit 3 — 기본값·재시도 무한 금지).
 - 토큰 값은 프로세스 메모리에서만 존재한다: 로그·stderr·레코드·종료 보고
   어디에도 쓰지 않는다. 모의테스트로만 검증한다(라이브 호출 없음).
+
+### 5.1 token_source="env" — 환경변수 직접 발급 경로 (선택)
+
+init 라인이 `"token_source":"env"`를 담을 때만 활성화되는 두 번째 자격
+경로다. 사용처는 kiwoomcli(네이티브 자격 저장소 subprocess)가 없는 실행
+환경 — 클라우드 컨테이너다. 그 외의 모든 init 라인(미지정 포함)은 §5의
+kiwoomcli 경로와 완전히 동일하게 동작한다(기본 경로 불변).
+
+- 요청(공식 문서 계약 그대로): `POST https://mockapi.kiwoom.com/oauth2/token`,
+  `Content-Type: application/json`, 본문
+  `{"grant_type":"client_credentials","appkey":<APP_KEY>,"secretkey":<APP_SECRET>}`.
+  자격 증명은 `APP_KEY_MOCK`·`APP_SECRET_MOCK` 환경변수에서만 읽는다.
+  누락·빈 값은 시작 거부다(error what=token, exit 3 — 기본값 대체·재시도
+  무한 금지).
+- 응답(전부 소문자 필드): `token`, `token_type`("bearer"), `expires_dt`
+  ("YYYYMMDDHHMMSS" KST 절대시각), `return_code`, `return_msg`. **표준
+  JSON 파서로만** 파싱한다 — 정규식 수동 파싱 금지(공식 문서 예시의
+  `token` 뒤 쉼표 누락은 오탈자이고 실제 응답은 JSON이다). `return_code`
+  는 공식 SDK 정규화 규칙(§2.2와 같은 정수·숫자 문자열 수용)으로 0일 때만
+  성공이다. **고정 유효기간 수치는 공식 문서에 없다** — expires_dt
+  절대시각만이 만료 근거이고, 파싱 불가한 expires_dt는 fail-closed다.
+- 발급 유량(au10001 약 초당 2회): **프로세스당 1회 발급 후 메모리에서
+  재사용**하고, expires_dt가 600초 버퍼(kiwoomcli 경로와 같은 값) 안으로
+  들어올 때만 재발급한다. 요청마다 재발급하지 않는다. 발급 실패 시 1회만
+  재시도하고, 그래도 실패하면 error(what=token)·exit 3(기존 계약과 같은
+  1회 재시도)이다.
+- **비밀 비기록 (MUST)**: appkey·secretkey·Authorization 헤더·토큰 값은
+  로그·stderr·stdout·HCJ 입력 기록·예외 메시지 어디에도 존재하지
+  않는다. 오류 메시지는 실패 유형만 담는다(예: "token endpoint returned
+  non-JSON", "token endpoint returned return_code=1"). 토큰은 프로세스
+  메모리에만 있고 어떤 파일에도 쓰이지 않는다(토큰 캐시 파일 자체가
+  생기지 않는다).
+- 토큰-IP 바인딩(오류 8010, 주석): 토큰은 발급 IP와 사용 IP가 같아야
+  한다. env 모드는 발급(이 프로세스의 OAuth POST)과 사용(같은 프로세스의
+  WS·REST)이 하나의 프로세스·하나의 네트워크 경로 안에서 일어나므로 이
+  계약이 구조적으로 성립한다 — 본 경로는 네트워크 구성을 바꾸지 않는다.
+  컨테이너 배치 시 발급과 사용의 egress IP가 달라지지 않도록 하는 것은
+  배치 책임이다.
+- 엔드포인트 주입은 테스트 전용이다: EnvTokenProvider는 엔드포인트를
+  생성자로 주입받아 로컬 fake 서버로 검증되지만, 운영 값은 고정된 demo
+  도메인의 공식 OAuth 경로에서만 유도된다. init 라인의
+  `rest_domain`==`DEMO_REST_DOMAIN` 가드(§2.1)는 이 경로로도 절대
+  완화되지 않는다.
 
 ## 6. 기록 규칙 (이미 커밋된 계약 그대로)
 
@@ -464,7 +512,11 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
 - sidecar: Python 3.13 격리 venv(`tools/collector/.venv`, gitignore),
   의존성은 `requirements.txt`(websockets만 — 키움 SDK 불필요·복제 금지).
   `bash tools/collector/test_sidecar.sh`가 venv를 보장하고 unittest를
-  돌린다(모킹 websockets·가짜 core — 라이브 호출 없음).
+  돌린다(모킹 websockets·가짜 core — 라이브 호출 없음). token_source="env"
+  경로(§5.1)는 127.0.0.1 임시 포트의 로컬 fake 토큰 HTTP 서버와 주입된
+  엔드포인트로 검증한다(실제 mockapi.kiwoom.com 접속 없음). 러너는 스위트
+  출력 전체를 자격 증명·토큰 픽스처 값으로 grep해 한 건이라도 나오면
+  스위트를 실패로 처리한다(비밀 비기록 MUST의 게이트 실측).
 - 게이트: `bash tools/run_tests.sh` exit 0 + `ALL CONTRACT SUITES PASSED`
   (새 스위트 포함). CI는 python 3.13 설치 단계를 갖는다.
 - 실행(라이브, 별도 사전검증 단계에서만): 
@@ -488,5 +540,8 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
   실측).
 - 토큰 경로 실측: 캐시 판독·만료 임계·재발급 동작(agent-89i8jq2u의
   10-31 만료 이후 관측).
+- env 토큰 경로 실측(§5.1): 실제 `/oauth2/token` 응답 필드 형상(소문자
+  필드·expires_dt 자릿수)·600초 갱신 실동작·8010(토큰-IP 바인딩) 발생 시
+  동작. 로컬 fake 서버 테스트는 계약 구현의 검증일 뿐 실측이 아니다.
 - websockets 잔여 UNVERIFIED(max_size 초과 종료 코드, recv 지연 무유실의
   직접 문구) — GAP 기록·fail-closed로 흡수.
