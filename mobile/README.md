@@ -120,7 +120,10 @@ where `Firebase.initializeApp` has not run. Remaining live steps:
 1. **google-services.json** — place it at
    `android/app/google-services.json` (Firebase console, package
    `com.hongscanner.hongscanner`). Never commit it — the path is
-   gitignored (`android/.gitignore`).
+   gitignored (`android/.gitignore`). CI restores it on every run from
+   the `GOOGLE_SERVICES_JSON` repo secret (`gh secret set
+   GOOGLE_SERVICES_JSON < mobile/android/app/google-services.json`);
+   without the secret the mobile workflow fails closed.
 2. **Gradle plugin** — `flutterfire configure` (step 3) inserts the
    google-services Gradle plugin automatically and idempotently, inside
    the `START/END: FlutterFire Configuration` markers:
