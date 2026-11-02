@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 
 import '../api/api_client.dart';
 import '../api/api_models.dart';
+import '../api/credentials.dart';
+import '../services/credential_store.dart';
 import '../services/push_permission.dart';
 import '../services/push_service.dart';
 
@@ -99,6 +101,7 @@ class AppStore extends ChangeNotifier {
     required ApiClient apiClient,
     required PushService pushService,
     KeyValueStore? keyValueStore,
+    CredentialStore? credentialStore,
     Future<void> Function(Duration delay)? delay,
     DateTime Function()? now,
     this._maxSyncAttempts = 3,
@@ -106,6 +109,7 @@ class AppStore extends ChangeNotifier {
   })  : _api = apiClient,
         _push = pushService,
         _ledger = PushPermissionLedger(store: keyValueStore),
+        _credentialStore = credentialStore ?? SecureCredentialStore(),
         _delay = delay ?? _defaultDelay,
         _now = now ?? DateTime.now;
 
@@ -115,6 +119,7 @@ class AppStore extends ChangeNotifier {
   final ApiClient _api;
   final PushService _push;
   final PushPermissionLedger _ledger;
+  final CredentialStore _credentialStore;
   final Future<void> Function(Duration) _delay;
   final DateTime Function() _now;
   final int _maxSyncAttempts;
@@ -123,6 +128,20 @@ class AppStore extends ChangeNotifier {
   bool _bootstrapped = false;
   bool _syncing = false;
   bool _disposed = false;
+
+  /// Set when any fetch in the current sync pass ended 401 — the signal
+  /// for the one re-entry prompt per pass.
+  bool _sawUnauthorized = false;
+
+  /// Whether the 401 re-entry prompt already ran in the current resync —
+  /// one prompt, one retry, never a loop.
+  bool _authPromptShown = false;
+
+  /// Set when reading the stored credentials failed (platform error,
+  /// corrupted storage). Fail-closed: treated exactly like "no stored
+  /// credentials" — the 401 path will ask for re-entry. Never carries
+  /// credential values.
+  Object? credentialLoadError;
 
   Section<StatusResponse> status = const Section();
   Section<EventsResponse> events = const Section();
@@ -153,24 +172,59 @@ class AppStore extends ChangeNotifier {
   StreamSubscription<String>? _fidSub;
   void Function(PushMessage message)? onForegroundMessage;
 
+  /// The 401 re-entry path, wired by the shell: shows the credential
+  /// dialog, persists what the operator submitted, and answers whether
+  /// the failed pass may be retried once. Absent (null) = no dialog path
+  /// wired; a 401 then just stays a visible error.
+  Future<bool> Function()? onUnauthorized;
+
   static const int detailTabIndex = 2;
 
   // ---- bootstrap --------------------------------------------------------
 
-  /// One-time startup: permission flow, push wiring, first sync.
+  /// One-time startup: credential load, permission flow, push wiring,
+  /// first sync.
   ///
   /// Auto-ask policy: the app asks exactly once, on the first run
   /// (ledger says never asked). Denied stays denied until the operator
   /// re-asks from the Overview card — Android 13+ makes silent re-asks
-  /// both nagging and unverifiable.
+  /// both nagging and unverifiable. [onUnauthorized] is the 401 re-entry
+  /// path (credential dialog); see [resync] for the one-prompt-one-retry
+  /// contract.
   Future<void> bootstrap({
     void Function(PushMessage message)? onForegroundMessage,
+    Future<bool> Function()? onUnauthorized,
   }) async {
     if (_bootstrapped) return;
     _bootstrapped = true;
     this.onForegroundMessage = onForegroundMessage;
+    this.onUnauthorized = onUnauthorized;
+    await _loadCredentials();
     await _initPushState();
     await resync();
+  }
+
+  /// Arms the API client with the stored credential pair, if one exists.
+  /// A read failure is fail-closed: recorded in [credentialLoadError] and
+  /// treated as "no stored credentials" — the first 401 will prompt for
+  /// re-entry instead of the failure being silently swallowed.
+  Future<void> _loadCredentials() async {
+    Credentials? credentials;
+    try {
+      credentials = await _credentialStore.load();
+    } on Object catch (e) {
+      credentialLoadError = e;
+    }
+    if (credentials != null) _api.authCredentials = credentials;
+  }
+
+  /// Persists re-entered credentials to the secure store and arms the API
+  /// client with them. The 401 dialog's submit path calls this before the
+  /// single retry. Storage failures propagate — the caller surfaces no
+  /// fake success and the visible 401 states remain.
+  Future<void> saveCredentials(Credentials credentials) async {
+    await _credentialStore.save(credentials);
+    _api.authCredentials = credentials;
   }
 
   Future<void> _initPushState() async {
@@ -349,14 +403,38 @@ class AppStore extends ChangeNotifier {
   /// Startup, foreground resume, and FCM message-discard recovery all land
   /// here: one full refresh of every recorded-fact section, with bounded
   /// backoff on failure.
+  ///
+  /// 401 contract (Basic Auth): when a pass hit a 401 and the re-entry
+  /// callback is wired, the prompt runs once per resync and a submission
+  /// triggers exactly one retry pass. Cancelling or a failing prompt ends
+  /// in the visible 401 error states — no further auth retries, no
+  /// backoff against the auth failure beyond the pass loop that already
+  /// exists.
   Future<void> resync() async {
     if (_syncing) return;
     _syncing = true;
     notifyListeners();
     try {
       syncCount += 1;
+      _authPromptShown = false;
       for (var attempt = 1; attempt <= _maxSyncAttempts; attempt++) {
-        final ok = await _fetchOnce();
+        _sawUnauthorized = false;
+        var ok = await _fetchOnce();
+        if (!ok &&
+            _sawUnauthorized &&
+            !_authPromptShown &&
+            onUnauthorized != null) {
+          _authPromptShown = true;
+          bool submitted;
+          try {
+            submitted = await onUnauthorized!();
+          } on Object {
+            // A prompt/storage failure is not a retry trigger: the
+            // visible 401 states stay, fail-closed.
+            submitted = false;
+          }
+          if (submitted) ok = await _fetchOnce(); // the single retry
+        }
         if (ok) break;
         if (attempt == _maxSyncAttempts) break;
         final backoff = _backoffBase * (1 << (attempt - 1));
@@ -381,6 +459,7 @@ class AppStore extends ChangeNotifier {
       try {
         assign(Section<T>.loaded(await fetch()));
       } on ApiClientException catch (e) {
+        if (e.statusCode == 401) _sawUnauthorized = true;
         assign(Section<T>.error(_describe(e), offline: e.isConnectivityProblem));
         ok = false;
       }
@@ -416,6 +495,9 @@ class AppStore extends ChangeNotifier {
   String _describe(ApiClientException e) {
     if (e.isConnectivityProblem) return '서버에 연결할 수 없음 (${e.message})';
     if (e.code == ApiErrorCode.http) {
+      if (e.statusCode == 401) {
+        return '인증 필요 (401) — 자격증명이 없거나 거부됨';
+      }
       return switch (e.serverCode) {
         'not_found' => '기록에 없음 (404 not_found)',
         'data_fault' => '기록 파일 불량 (500 data_fault)',
