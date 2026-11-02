@@ -42,6 +42,7 @@ run bash tools/notify/test_notify.sh
 run bash tools/notify/drill/drill_fcm.sh
 run bash tools/notify/drill/drill_watch.sh
 run bash tools/api/test_api.sh
+run bash tests/test_container_contract.sh
 run bash tests/test_cli_contract.sh
 run bash tests/test_build_contract.sh
 run bash tests/test_install_attested.sh
