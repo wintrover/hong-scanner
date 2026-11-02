@@ -55,7 +55,12 @@
 ## SESSION_APPROVED are session-level verify outputs (§13.6), never step
 ## facts. A chain that did not affirm success (upDownCandidates raised)
 ## yields no candidate events: the stream-level audit rejects the run
-## (rest_resp.verifyAttempts), so no unconfirmed state is ever judged.
+## (rest_resp.verifyAttempts), so no unconfirmed state is ever judged. A
+## round that closed at the declared cap while cont-yn=Y is a declared
+## truncated subset (REPLAY_CONTRACT §12.1): the audit accepts it as such,
+## but it is consumed here without judgment — a partial universe is no
+## candidate generation, and the truncation fact is the collector's gap
+## record (the REST_TRUNCATED event), never a silent pass.
 import std/[strutils, algorithm, options]
 import hcj, records, digest, sub_input, vendor_input, rest_resp, tickwire
 
@@ -366,8 +371,21 @@ proc pairRounds(s: var EventGenState; events: var seq[EventFact]) =
   ## single normalization authority — nothing is re-parsed here). The
   ## transition seq is the paired record the derivation completed on:
   ## the later of the two rounds' last pages. A chain that did not
-  ## affirm success consumes the rounds and yields no events.
+  ## affirm success consumes the rounds and yields no events. A round
+  ## that closed at the declared cap while cont-yn=Y is a declared
+  ## truncated subset (REPLAY_CONTRACT §12.1): consumed the same way and
+  ## never judged — a partial universe is no candidate generation, and
+  ## the truncation fact is the collector's gap record (the
+  ## REST_TRUNCATED event), never a silent pass.
   while true:
+    var i = 0
+    while i < s.rounds.len:
+      let rr = s.rounds[i]
+      if rr.pages.len > 0 and rr.pages[^1].resp.contYn == "Y" and
+          rr.pages.len >= s.pageCap:
+        s.rounds.delete(i)
+      else:
+        inc i
     var ui = -1
     var di = -1
     for i, rr in s.rounds:
@@ -406,8 +424,10 @@ proc pairRounds(s: var EventGenState; events: var seq[EventFact]) =
 proc restEvents(s: var EventGenState; r: Record; events: var seq[EventFact]) =
   ## One recorded REST attempt joins the declared page chain of its
   ## scope. A page-1 record always opens a fresh round of that scope
-  ## (the collector's chain policy; an abandoned incomplete round is
-  ## never judged — the stream-level audit rejects such a stream). A
+  ## (the collector's chain policy; an abandoned below-cap incomplete
+  ## round is never judged — the stream-level audit rejects such a
+  ## stream; a cap-closed round is a declared truncated subset — the
+  ## audit accepts it and pairRounds consumes it without judgment). A
   ## later page must continue the scope's newest round at exactly the
   ## next page index; anything else is chain corruption the audit
   ## rejects, so it judges nothing.

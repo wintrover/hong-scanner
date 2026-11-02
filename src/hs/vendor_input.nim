@@ -54,7 +54,13 @@
 ##     capture); a chain that reaches the cap while cont-yn=Y is vfTruncated
 ##     (the declared candidate subset did not cover the vendor's
 ##     continuation). Both are rejected: "truncated" is a classification the
-##     acceptance contract may consume, never a success.
+##     acceptance contract may consume, never a success. The consumption is
+##     explicit and caller-owned: truncatedOk/upTruncated/downTruncated
+##     declare that the caller owns the truncation fact (the collector's gap
+##     record and the REST_TRUNCATED event) and consumes the chain as a
+##     declared truncated subset -- the fetched pages are still fully
+##     validated, and below-cap cont-yn=Y is never consumable (no caller can
+##     declare a missing continuation page away).
 ##   - VERIFY: verifyEvents recomputes the events from the raw capture and
 ##     compares them byte- and value-wise with the stored events; any
 ##     difference is an issue and the caller must reject.
@@ -454,11 +460,18 @@ proc parsePageRows(spec: TrSpec; resp: RawHttpResp): seq[HcjValue] =
                  "row is neither an object nor a positional array: " &
                  kindName(item))
 
-proc validateChainPages(spec: TrSpec; pages: seq[RawHttpResp]; pageCap: int) =
+proc validateChainPages(spec: TrSpec; pages: seq[RawHttpResp]; pageCap: int;
+                        truncatedOk = false) =
   ## Repeat and the cap apply only to the explicit paginated subset. A chain
   ## that ends while cont-yn=Y is never a success: below the cap a
   ## continuation page is missing (vfIncomplete); at the cap the declared
-  ## subset is truncated (vfTruncated).
+  ## subset is truncated (vfTruncated). truncatedOk is the acceptance
+  ## contract's declaration (REPLAY_CONTRACT §12.1: the cap is a
+  ## scanner-side declaration, the pages beyond it are "not fetched", never
+  ## "no more candidates"): the caller owns the truncation fact -- the gap
+  ## record and the REST_TRUNCATED event -- and consumes this chain as a
+  ## declared truncated subset. The fetched pages are still fully validated;
+  ## nothing about them is waived.
   if spec.paginated:
     if pageCap < 1:
       raise verr(vfContract, "page cap must be >= 1: " & $pageCap)
@@ -478,13 +491,15 @@ proc validateChainPages(spec: TrSpec; pages: seq[RawHttpResp]; pageCap: int) =
     let last = pages[pages.len - 1]
     if last.contYn == "Y":
       if pages.len >= pageCap:
-        raise verr(vfTruncated,
-                   "page cap " & $pageCap & " reached while cont-yn=Y: the " &
-                   "declared candidate subset is truncated — the vendor still " &
-                   "has data; rejected (fail-closed, never success)")
-      raise verr(vfIncomplete,
-                 "page chain ended while cont-yn=Y below the cap: a declared " &
-                 "continuation page is missing; rejected (fail-closed)")
+        if not truncatedOk:
+          raise verr(vfTruncated,
+                     "page cap " & $pageCap & " reached while cont-yn=Y: the " &
+                     "declared candidate subset is truncated — the vendor still " &
+                     "has data; rejected (fail-closed, never success)")
+      else:
+        raise verr(vfIncomplete,
+                   "page chain ended while cont-yn=Y below the cap: a declared " &
+                   "continuation page is missing; rejected (fail-closed)")
   else:
     if pages.len != 1:
       raise verr(vfContract,
@@ -494,11 +509,14 @@ proc validateChainPages(spec: TrSpec; pages: seq[RawHttpResp]; pageCap: int) =
                  "an explicit subset, not the whole")
 
 proc normalizeChain*(spec: TrSpec; chain: PageChain;
-                     pageCap: int = defaultPageCap): seq[VendorEvent] =
+                     pageCap: int = defaultPageCap;
+                     truncatedOk = false): seq[VendorEvent] =
   ## Pure: preserved page bytes -> normalized row events, in page then row
   ## order. Every failure raises; a partial event list is never returned.
+  ## truncatedOk consumes a cap-closed chain as a declared truncated subset
+  ## (the caller owns the truncation fact; see validateChainPages).
   validateKa10027Query(chain.query)
-  validateChainPages(spec, chain.pages, pageCap)
+  validateChainPages(spec, chain.pages, pageCap, truncatedOk)
   for pi, resp in chain.pages:
     for ri, row in parsePageRows(spec, resp):
       var ps: seq[HcjPair] = @[
@@ -535,11 +553,13 @@ proc normalizeEvents*(cap: VendorCapture;
   result.add(wsEvents(cap.wsPayloads))
 
 proc chainSymbols*(spec: TrSpec; chain: PageChain;
-                   pageCap: int = defaultPageCap): seq[string] =
+                   pageCap: int = defaultPageCap;
+                   truncatedOk = false): seq[string] =
   ## stk_cd of every row, in vendor order. A row without stk_cd cannot yield
-  ## a candidate and rejects the whole chain (fail-closed).
+  ## a candidate and rejects the whole chain (fail-closed). truncatedOk
+  ## consumes a cap-closed chain as a declared truncated subset.
   validateKa10027Query(chain.query)
-  validateChainPages(spec, chain.pages, pageCap)
+  validateChainPages(spec, chain.pages, pageCap, truncatedOk)
   for resp in chain.pages:
     for row in parsePageRows(spec, resp):
       let cd = row.getOpt("stk_cd")
@@ -549,10 +569,15 @@ proc chainSymbols*(spec: TrSpec; chain: PageChain;
       result.add(cd.get.asStr)
 
 proc upDownCandidates*(upChain, downChain: PageChain;
-                       pageCap: int = defaultPageCap): UpDownCandidates =
+                       pageCap: int = defaultPageCap;
+                       upTruncated = false; downTruncated = false):
+                       UpDownCandidates =
   ## KRX candidate universe from one up (sort_tp 1) and one down (sort_tp 3)
   ## query. Any response/page failure raises; explicitly empty arrays are a
   ## valid vendor answer and are returned as empty, never as an error.
+  ## upTruncated/downTruncated declare that leg cap-closed: the caller owns
+  ## that leg's truncation fact and consumes it as a declared truncated
+  ## subset (the other validation of that leg is unchanged).
   if upChain.query.direction != dirUp:
     raise verr(vfContract, "up chain query direction is not up (sort_tp 1)")
   if downChain.query.direction != dirDown:
@@ -560,8 +585,8 @@ proc upDownCandidates*(upChain, downChain: PageChain;
   if upChain.query.stexTp != krxStexTp or downChain.query.stexTp != krxStexTp:
     raise verr(vfContract,
                "candidate queries are KRX-only: stex_tp must be " & krxStexTp)
-  result.up = chainSymbols(ka10027Spec, upChain, pageCap)
-  result.down = chainSymbols(ka10027Spec, downChain, pageCap)
+  result.up = chainSymbols(ka10027Spec, upChain, pageCap, upTruncated)
+  result.down = chainSymbols(ka10027Spec, downChain, pageCap, downTruncated)
 
 # ---------------------------------------------------------------- verification
 

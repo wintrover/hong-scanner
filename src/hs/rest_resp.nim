@@ -251,15 +251,23 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
   ## stream order: pages must run 1..N without gaps, duplicates or restarts,
   ## and the whole chain must pass vendor_input.normalizeChain -- the same
   ## success affirmation and cont-yn/page-cap rules as the vendor layer.
+  ## A round that reaches the declared cap while cont-yn=Y is audited as a
+  ## declared truncated subset (truncatedOk): the cap is a scanner-side
+  ## declaration, the pages beyond it are "not fetched", never "no more
+  ## candidates" (REPLAY_CONTRACT §12.1) -- its pages are verified
+  ## responses of a declared partial chain, the truncation fact is the
+  ## collector's gap record and the REST_TRUNCATED event. Below the cap
+  ## cont-yn=Y is still a REJECT: a missing continuation page is never
+  ## declared away.
   ##
   ## pollSeconds is the config-declared re-poll cadence (README §6.1, the
   ## "approved extension path" rest_resp reserves). 0 (undeclared) keeps the
   ## historical single-chain rule: a page-1 restart inside a scope is a
   ## REJECT. Declared (> 0), each page-1 record opens a new round of that
   ## scope's chain -- the initial lookup and the re-poll rounds coexist --
-  ## and every round is itself audited as a full 1..N chain with a terminal
-  ## cont_yn (normalizeChain), so an unterminated re-poll chain is still
-  ## never a success.
+  ## and every round is itself audited as a full 1..N chain (a terminal
+  ## cont_yn, or the cap-closed truncated-subset rule above), so an
+  ## unterminated below-cap re-poll chain is still never a success.
   if attempts.len == 0: return
   var keys: seq[string]
   var groups: seq[seq[RestRespAttempt]]
@@ -298,8 +306,9 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
     for a in g:
       pages.add(a.resp)
     let chain = PageChain(query: g[0].scope, pages: pages)
+    let capClosed = g[^1].resp.contYn == "Y" and g.len >= pageCap
     try:
-      discard normalizeChain(ka10027Spec, chain, pageCap)
+      discard normalizeChain(ka10027Spec, chain, pageCap, capClosed)
     except VendorInputError as e:
       raise rerr(g[0].seqNo, e.failure,
                  "ka10027 page chain (sort_tp " &
