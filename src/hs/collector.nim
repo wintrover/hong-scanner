@@ -51,6 +51,8 @@ type
     ackTimeoutSeconds*: int    ## declared quiescence bound, derived from drain
     watchdog*: string          ## "15:40:00+09:00" (scanner clock, not market authority)
     profile*: string           ## kiwoomcli account alias (demo profile)
+    tokenSource*: string       ## init-line token_source: "kiwoomcli" (default)
+                               ## or "env" (README §5.1, the container path)
     params*: Params
     calendar*: HcjValue        ## the approved calendar snapshot (recorded as seq 1)
 
@@ -130,7 +132,8 @@ const
 proc initCollectorConfig*(sessionDate, environment, profile: string;
                           mrktTp, trdeQtyCnd, stkCnd, crdCnd, updownIncls,
                           pricCnd, trdePricaCnd, stexTp: string;
-                          params: Params; calendar: HcjValue): CollectorConfig =
+                          params: Params; calendar: HcjValue;
+                          tokenSource = "kiwoomcli"): CollectorConfig =
   ## Build and validate the collector configuration. The approved PH-1
   ## values are pinned here (README §5/§6.1): demo endpoints, page cap 10,
   ## repoll 300 s, drain 10 s, ack timeout 10 s, watchdog 15:40 KST. A
@@ -148,6 +151,11 @@ proc initCollectorConfig*(sessionDate, environment, profile: string;
   for c in profile.items:
     if c in {' ', '\t', '\n', '\r'}:
       raise cerr("profile alias must not contain whitespace: " & profile)
+  # The declared token path is pinned to the two approved values: anything
+  # else is refused, never silently run (README §2.1/§5.1). The default
+  # "kiwoomcli" changes nothing for callers that do not pass the field.
+  if tokenSource != "kiwoomcli" and tokenSource != "env":
+    raise cerr("token_source must be kiwoomcli or env: " & tokenSource)
   # The declared query scope must be inside the documented enums for both
   # directions before anything is recorded or sent.
   discard initKa10027Query(dirUp, mrktTp, trdeQtyCnd, stkCnd, crdCnd,
@@ -172,6 +180,7 @@ proc initCollectorConfig*(sessionDate, environment, profile: string;
     ackTimeoutSeconds: 10,
     watchdog: approvedWatchdog,
     profile: profile,
+    tokenSource: tokenSource,
     params: params,
     calendar: calendar)
 
@@ -259,6 +268,7 @@ proc initLine*(cfg: CollectorConfig): string =
       ("trde_prica_cnd", hStr(cfg.trdePricaCnd)),
       ("trde_qty_cnd", hStr(cfg.trdeQtyCnd)),
       ("updown_incls", hStr(cfg.updownIncls)))),
+    ("token_source", hStr(cfg.tokenSource)),
     ("watchdog", hStr(cfg.watchdog)),
     ("ws_endpoint", hStr(cfg.wsEndpoint))))
 

@@ -16,7 +16,8 @@
 ##      becomes success).
 ##
 ## Usage: collector --profile <alias> --session-date YYYY-MM-DD --out <dir>
-##                [--calendar=<path>] [--mrkt-tp=000] ... (declared query
+##                [--calendar=<path>] [--token-source=kiwoomcli]
+##                [--mrkt-tp=000] ... (declared query
 ##                scope, approved PH-1 values by default).
 import std/[os, osproc, strutils, posix, times, streams]
 import hs/[hcj, records, calendars, engine, collector, recorder, event_gen]
@@ -24,12 +25,18 @@ import hs/[hcj, records, calendars, engine, collector, recorder, event_gen]
 const usageText = """collector — the VS-2 live collector (demo, PH-1)
 
   collector --profile <alias> --session-date YYYY-MM-DD --out <dir>
-            [--calendar=calendars/krx-2026q4.json]
+            --calendar=<path>
+            [--token-source=kiwoomcli]
             [--mrkt-tp=000 --trde-qty-cnd=0000 --stk-cnd=0 --crd-cnd=0
              --updown-incls=1 --pric-cnd=0 --trde-prica-cnd=0 --stex-tp=1]
             [--lookback=3 --pullback-min-bp=50 --recovery-bp=30
              --rebound-min-bp=50 --breakdown-bp=30 --warmup-bars=0
              --hold-on-degraded=1]
+
+--token-source names the sidecar credential path carried in the init
+line: "kiwoomcli" (default — the native client's token cache) or "env"
+(direct OAuth issuance from APP_KEY_MOCK/APP_SECRET_MOCK, README §5.1 —
+the cloud container path). Any other value is refused.
 
 Exit codes: 0 normal, 2 usage/contract, 4 INCOMPLETE (unsealed, preserved).
 """
@@ -209,10 +216,13 @@ proc main(): int =
   let sessionDate = argValue(args, "session-date")
   let outDir = argValue(args, "out")
   let calendarPath = argValue(args, "calendar")
+  let tokenSource = argValue(args, "token-source").defaultStr("kiwoomcli")
   if profile.len == 0 or sessionDate.len == 0 or outDir.len == 0:
     fail(2, "collector requires --profile, --session-date and --out")
   if calendarPath.len == 0:
     fail(2, "collector requires --calendar (the approved snapshot)")
+  if tokenSource != "kiwoomcli" and tokenSource != "env":
+    fail(2, "collector: --token-source must be kiwoomcli or env")
   # createDir is pure creation: it never destroys an existing directory's
   # content, and openRecorder refuses an existing input file outright.
   try:
@@ -247,7 +257,8 @@ proc main(): int =
         holdOnDegraded:
           argValue(args, "hold-on-degraded").defaultInt(1,
             "hold-on-degraded") != 0),
-      readDocFile(calendarPath))
+      readDocFile(calendarPath),
+      tokenSource)
   except CollectorError as e:
     fail(2, "COLLECTOR CONFIG: " & e.msg)
   except CoverageError as e:

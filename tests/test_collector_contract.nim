@@ -50,6 +50,16 @@ proc newCollector(): Collector =
            breakdownBp: 30, warmupBars: 0, holdOnDegraded: true),
     calRaw()))
 
+proc newCfg(tokenSource: string): CollectorConfig =
+  ## The same approved config with an explicit init-line token_source
+  ## (README §2.1/§5.1): "kiwoomcli" (the default) or "env".
+  initCollectorConfig(
+    "2026-10-29", "demo", "demo-profile",
+    "000", "0000", "0", "0", "1", "0", "0", "1",
+    Params(lookback: 3, pullbackMinBp: 50, recoveryBp: 30, reboundMinBp: 50,
+           breakdownBp: 30, warmupBars: 0, holdOnDegraded: true),
+    calRaw(), tokenSource)
+
 proc evLine(ps: seq[HcjPair]): string =
   canonical(hObj(ps))
 
@@ -134,6 +144,16 @@ block config:
         "\"watchdog\":\"15:40:00+09:00\"" in
         newCollector().cfg.initLine() and
         "\"profile\":\"demo-profile\"" in newCollector().cfg.initLine())
+  check("initLine names the kiwoomcli token source by default (an " &
+        "undecorated init line never switches the credential path)",
+        "\"token_source\":\"kiwoomcli\"" in newCollector().cfg.initLine())
+  check("the env token source reaches the init line verbatim (README §5.1)",
+        "\"token_source\":\"env\"" in newCfg("env").initLine() and
+        "kiwoomcli" notin newCfg("env").initLine())
+  coreErr("a non-approved token source is refused",
+          "token_source must be kiwoomcli or env",
+          proc () =
+            discard newCfg("bogus"))
   let pre = newCollector().cfg.preambleRecords()
   check("preamble is calendar then config",
         pre.len == 2 and pre[0].kind == kCalendar and

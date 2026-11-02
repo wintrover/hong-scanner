@@ -96,6 +96,8 @@ EOF
 # the collector sends (init + connect) before exiting, so no directive
 # send can race the stub's exit and the collector's next read is a pure
 # pipe-EOF. The second line ("token") must NEVER come back as "ready".
+# The init line it receives is dumped verbatim: the token_source flag
+# assertions below read it back (README §2.1/§5.1).
 cat > "$SANDBOX/sidecar.py" <<'EOF'
 import sys
 
@@ -104,7 +106,9 @@ out = sys.stdout
 out.write('{"ev":"ready","t":"%s"}\n' % t)
 out.write('{"ev":"token","t":"%s"}\n' % t)
 out.flush()
-sys.stdin.readline()  # init
+init = sys.stdin.readline()  # init
+with open("initdump.txt", "w", encoding="utf-8") as f:
+    f.write(init)
 sys.stdin.readline()  # connect
 sys.exit(0)
 EOF
@@ -133,6 +137,39 @@ assert_contains "the gap records the honest close reason" "$LAST" \
   "the sidecar pipe closed before the termination protocol completed"
 assert_contains "the gap closes as incomplete (never success)" "$LAST" \
   '"what":"incomplete"'
+
+# ------------------------------------------------------- token_source flag
+# The binary is the only window through which a session declares the
+# sidecar credential path (README §2.1/§5.1). The stub dumped the init
+# line of the default run above; an explicit --token-source=env run must
+# carry the field verbatim and nothing else may change (the same honest
+# INCOMPLETE). All values are synthetic: no credential ever exists here.
+INIT1="$(cat "$SANDBOX/initdump.txt")"
+assert_contains "default init line names the kiwoomcli token source" \
+  "$INIT1" '"token_source":"kiwoomcli"'
+
+RUN2="$SANDBOX/run-env"
+RC2=0
+(cd "$SANDBOX" && HSCOLLECTOR_PYTHON=python3 PYTHONDONTWRITEBYTECODE=1 \
+  "$BIN" --profile=pipe-test --session-date=2026-10-30 \
+  --calendar="$SANDBOX/cal.json" --out="$RUN2" --token-source=env \
+  > "$SANDBOX/collector2.stdout" 2> "$SANDBOX/collector2.stderr") || RC2=$?
+assert_eq "--token-source=env run is the same honest INCOMPLETE (4)" 4 "$RC2"
+INIT2="$(cat "$SANDBOX/initdump.txt")"
+assert_contains "the env run's init line names the env token source" \
+  "$INIT2" '"token_source":"env"'
+assert_not_contains "the env run's init line does not name kiwoomcli" \
+  "$INIT2" "kiwoomcli"
+
+RUN3="$SANDBOX/run-bad"
+RC3=0
+(cd "$SANDBOX" && HSCOLLECTOR_PYTHON=python3 PYTHONDONTWRITEBYTECODE=1 \
+  "$BIN" --profile=pipe-test --session-date=2026-10-30 \
+  --calendar="$SANDBOX/cal.json" --out="$RUN3" --token-source=bogus \
+  > "$SANDBOX/collector3.stdout" 2> "$SANDBOX/collector3.stderr") || RC3=$?
+assert_eq "a non-approved --token-source is refused (exit 2)" 2 "$RC3"
+assert_absent_file "the refused run started nothing (no input log)" \
+  "$RUN3/input.hcj.jsonl"
 
 echo
 if [ "$FAILED" -eq 0 ]; then
