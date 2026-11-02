@@ -1,4 +1,4 @@
-# Hong Scanner — Replay Contract (VS-1 baseline, VS-2/VS-3 targets, v6.3)
+# Hong Scanner — Replay Contract (VS-1 baseline, VS-2/VS-3 targets, v6.4)
 
 This document states the intended VS-1 contract. Tests cover selected cases;
 passing them does not prove every statement or replace review of the actual
@@ -556,3 +556,73 @@ synthetic fixtures and a dev-build drill is mechanism, not operation — no
 live market data, no real vendor stream, no delivery path, no GATES P12
 observation. Any `NO_TRIGGER_OBSERVED`-style claim remains impossible
 until a real observed stream exists.
+
+## 14. Container runtime contract (Northflank Phase-0)
+
+The Phase-0 container layer — image layout, supervisor, supply chain — is
+contracted in `tools/container/README.md`; this section states only what
+touches the replay contract. What exists is the code and its contract
+suites (README §6, §7.4). No Northflank deployment and no cloud Kiwoom
+connection exist yet, so nothing in this section is live-measured.
+
+### 14.1 Path contract: image vs volume
+
+| path | supplied by | content |
+|---|---|---|
+| `/opt/hongscanner` | the image (read-only fate) | code: `serve.py`, `cloud_supervisor.py`, `bin/hongscanner`, `bin/collector`, `bin/sidecar.py`, notify modules, baked `CALENDAR_INDEX.sha256` |
+| `/var/lib/hongscanner` | the Northflank Single Read/Write Volume (deployment Replica 1 — ASSUMPTIONS P16) | `runs/` (run directories), `notify/` (ledger, notify config), `calendars/*.json` (user data, gitignored) |
+
+Everything the replay contract reads or writes at runtime lives under the
+volume root. The image contributes code and the baked calendar INDEX only —
+no market data, no credentials, no ledger bytes are baked (README §2, §8.4).
+
+### 14.2 The supervisor is an execution adapter
+
+`cloud_supervisor.py` owns child-process lifetime and session scheduling
+only. It performs no market judgment and writes nothing into any run
+directory: §13.3's single-writer order extends to this boundary — the
+recorder stays the only writer of a session's records. The supervisor's
+observable surface is its stdout log (`SUPERVISOR`-prefixed lines): like
+`ws_conn` (§3) it is diagnostic, carries no judgment, and nothing in the
+replay path reads it.
+
+### 14.3 Session idempotency (boot and restart agree)
+
+Any container (re)start lands on the same conclusion for the day:
+
+- a COMMITTED run for today (`input.hcj.jsonl.committed`) ends the day —
+  no new session;
+- an unsealed run is preserved as prior evidence: never resumed, never
+  overwritten; a new observation attempt gets a fresh `run_id`
+  (`ph1-<date>-a`, `-b`, …) inside the remaining window;
+- the run directory is created exclusively (`O_EXCL`) as a second defense
+  behind the supervisor's single-session control; attempts are capped at
+  3 per day (the count of existing run directories is the attempt count);
+- collector exit 0 = sealed (COMMITTED), exit 4 = honest INCOMPLETE, any
+  other exit (2, 3, signal) = preserved. No exit is promoted to success.
+
+### 14.4 Calendar supply separation (fail-closed)
+
+Two sources, and neither is trusted blindly:
+
+- the image carries the git-tracked `CALENDAR_INDEX.sha256` (canonical
+  main origin);
+- the volume supplies the actual `calendars/*.json`.
+
+The supervisor's startup latch (`/startup`) cross-verifies the volume
+calendars against the baked INDEX and holds 503 — no sessions start —
+until the verification passes. A volume calendar that fails the
+cross-check fails closed: initialization never completes, and the
+hash-pinned calendar provenance of §11 is never silently bypassed.
+
+### 14.5 `token_source` in the recorded stream
+
+The collector child may be started with `--token-source=env`: the OAuth
+token then comes from runtime-injected environment variables, and the
+credential values themselves are never recorded. What the init line (the
+`config` record, §2 record 2) carries is the declaration
+`token_source: "env"` — which provider supplied the token, not the token.
+An undecorated init line keeps the default `kiwoomcli` path unchanged.
+This is the §12.2 rule ("never preserve credentials") applied to the
+cloud path, and it keeps §8's provenance checks meaningful: the recorded
+stream still contains every input Core consumed.

@@ -17,6 +17,12 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | M8 | canonical main build must be clean, on main, equal to origin/main | `tools/build.sh` |
 | M9 | `MATCH` requires all five provenance comparisons | `verifyRun` |
 | M10 | CI must not fetch market data | fixtures are committed, tests closed-book |
+| M11 | the container runtime preserves Core determinism and the Replay contract — the supervisor judges nothing and writes no run directory | REPLAY_CONTRACT §14; `verify` byte-comparison unchanged |
+| M12 | the recorder and the event ledger each have exactly one writer | collector `O_EXCL` journal (§13.8); notify ledger append-only single-writer |
+| M13 | no secret or token enters git, the image, HCJ records, or plain logs — the init line records `token_source`, never a credential value | `.dockerignore` whitelist (tools/container/README.md §2); §12.2 "never preserve credentials" |
+| M14 | only the canonical main attest-verified binary runs in operation | GATES P13 (attest → install → digest match) |
+| M15 | mobile stays read-only against the API | GET-only server (tools/api/README.md); §13.7 "mobile is read-only" |
+| M16 | no incomplete or failed session is ever promoted to success | `VERDICT INCOMPLETE` (exit 4); tools/container/README.md §7.3 — no exit is promoted |
 
 ## POLICY (a chosen contract, changeable by decision)
 
@@ -37,6 +43,11 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | P13 | the commit marker's `t` is the only wall-clock input at the recorder adapter boundary; Core still has none | timestamps in Core (rejected: M1) |
 | P14 | subscription REGs are single-type in the official example form, refresh `"1"`, grp_no `"1"`; `0s` is registered by its own REG and never enters a 0B replacement request; a swap is REMOVE(outgoing) → ack → REG(incoming, refresh `"1"`) → ack; refresh `"0"` is never sent | multi-type REG with 0s auto-added (rejected: no official precedent, V1) |
 | P15 | subscription confirmation records REG/REMOVE acks; `activeSets` reflects ack `return_code` 0 only | trusting requests alone (rejected: a request is not evidence) |
+| P16 | the Northflank deployment is one container (Replica 1) with a Single Read/Write Volume for `/var/lib/hongscanner` | multiple replicas/HA (rejected: M12 needs exactly one writer) |
+| P17 | the session window is scanner-side clock policy: KST 08:50 start, 15:30 last start, 15:40 watchdog | vendor-close-driven scheduling (rejected: FID 215 is close evidence, not a start authority — §12.4) |
+| P18 | candidates are re-queried every 300 s during the session (`repollSeconds`, approved PH-1 value) | another cadence (unapproved: §12.1 requires the cadence declared and recorded) |
+| P19 | the cloud path targets demo first: the sidecar refuses any base other than demo/mockapi | prod from day one (rejected: the mock is the documented test stage; prod is a separate confirmation) |
+| P20 | liveness covers the supervisor itself only; startup/readiness/liveness stay three separate probes (tools/container/README.md §7.2) | child-aware liveness (rejected: contract A — child state must not trigger container restarts) |
 
 ## IMPLEMENTATION CHOICE (free to change without breaking the contract)
 
@@ -48,6 +59,10 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | I4 | `-d` injection for build provenance instead of a generated source file |
 | I5 | checksum manifest is three sorted lines |
 | I6 | `bar_position` and `session_class` stored on the bar record |
+| I7 | the container's always-on process is `tools/container/cloud_supervisor.py` — execution adapter: child lifecycle + session scheduling, stdout log only |
+| I8 | cloud OAuth via the sidecar EnvTokenProvider (`token_source=env`); the kiwoomcli Secret Service path stays the default outside the container |
+| I9 | GHCR images are tagged with the immutable convention `main-<sha7>`, one push per exact main sha; tag overwrite and `latest` are forbidden |
+| I10 | mobile keeps its API credential in Android secure storage (Keystore-backed); the API front is Northflank ingress HTTPS + Basic Auth |
 
 ## UNKNOWN (must be measured, not assumed)
 
@@ -57,7 +72,7 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | U2 | meaning and reset window of cumulative volume `13` | G4 |
 | U3 | start/end timestamp convention of REST bars | G4 |
 | U4 | `290` behaviour at the closing auction | G4 |
-| U5 | fixed egress IP availability and cost on the target account | deployment (not started) |
+| U5 | fixed egress IP availability and cost on the target account | NF-1 (GATES) |
 | U6 | real signal frequency and false-positive rate | PH-1/PH-2 |
 | U7 | durability under power loss | VS-2 drill |
 | U8 | whether the live feed drops ticks silently (0B delivery completeness) — no provider sequence or completeness contract exists (full-text search of all 337 API specs: zero hits), so client logs alone cannot prove absence | G2: WS-derived volume vs REST `acc_trde_qty` |
@@ -65,6 +80,12 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | U10 | refresh=0's termination scope, grp_no scope semantics, REMOVE partial-removal behavior, multi-type REG acceptance (official wording absent for all four) | G2 mock subscription experiments |
 | U11 | Kiwoom PING period and no-response policy | G2 (ws_raw PING records) |
 | U12 | the full FID 215 value table beyond the evidenced close subset {2, 4, 8, 9} | G2 observation |
+| U13 | whether Kiwoom accepts (registering) a Northflank dedicated egress IP | NF-1 |
+| U14 | APAC region latency (Kiwoom and device push) — not yet measured | NF-3 |
+| U15 | actual volume usage and required size (1 GiB provisional from the 2026-11-02 runs/ measurement — GATES Phase-0 evidence log) | NF-4 |
+| U16 | the final `min_severity` policy value (the session default HIGH is provisional; REST_TRUNCATED can fire per poll) | user decision |
+| U17 | FCM and API end-to-end from a cloud deployment to a real device | NF-8 |
+| U18 | GHCR package visibility handling (first push is private by default; the operator read:packages PAT path) | NF-9 (tools/container/README.md §8.3) |
 
 ## Vendor facts (official sources, 2026-10-30)
 
