@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only API contract suite (tools/api/README.md §6): unittest over
-a real serve.py process on 127.0.0.1 on an EPHEMERAL port (0), against
-synthetic fixture run directories and ledgers built in a mktemp
-sandbox. Loopback network only, no market data, no credentials, no
-live calls.
+a real serve.py process on an EPHEMERAL port (0), loopback by default
+plus one --bind case on 127.0.0.2, against synthetic fixture run
+directories and ledgers built in a mktemp sandbox. Loopback network
+only, no market data, no credentials, no live calls.
 
 The suite starts and reaps every server process it spawns and asserts
 each one exits cleanly (SIGTERM -> exit 0, no residue). A malformed
@@ -236,14 +236,18 @@ def build_main_sandbox():
 
 
 class ServerProc:
-    """One serve.py subprocess on an ephemeral loopback port. The SERVE
-    line is the only startup evidence the suite accepts."""
+    """One serve.py subprocess on an ephemeral port. The SERVE line is
+    the only startup evidence the suite accepts, and it must name the
+    address the server was asked to bind."""
 
-    def __init__(self, box, with_delivery=True):
+    def __init__(self, box, with_delivery=True, bind=None):
+        host = bind if bind is not None else "127.0.0.1"
         args = [PY, SERVE, "--runs", box.runs, "--ledger", box.ledger,
                 "--port", "0"]
         if with_delivery:
             args += ["--delivery", box.delivery]
+        if bind is not None:
+            args += ["--bind", bind]
         self.proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
         ready = select.select([self.proc.stdout], [], [], 20)[0]
@@ -253,10 +257,11 @@ class ServerProc:
             raise AssertionError("serve.py did not print SERVE in 20s: "
                                  "stdout=%r stderr=%r" % (out, err))
         line = self.proc.stdout.readline().decode("utf-8").strip()
-        if not line.startswith("SERVE 127.0.0.1:"):
+        if not line.startswith("SERVE %s:" % host):
             raise AssertionError("unexpected serve line: %r" % line)
+        self.bind = host
         self.port = int(line.split(":")[1])
-        self.base = "http://127.0.0.1:%d" % self.port
+        self.base = "http://%s:%d" % (host, self.port)
 
     def get(self, path, method="GET"):
         req = urlrequest.Request(self.base + path, method=method)
@@ -283,7 +288,7 @@ class ServerProc:
             "serve.py process survived SIGTERM"
         with socket.socket() as probe:
             try:
-                probe.connect(("127.0.0.1", self.port))
+                probe.connect((self.bind, self.port))
             except ConnectionRefusedError:
                 return
             raise AssertionError("port %d still accepting: residue" %
@@ -672,15 +677,42 @@ class StartupFailClosed(unittest.TestCase):
         finally:
             box.cleanup()
 
-    def test_bind_option_does_not_exist(self):
-        # the bind host is not configurable: 0.0.0.0 must be unusable
+    def test_bind_refuses_multicast_broadcast_and_non_ipv4(self):
+        # a bad --bind value dies on the argparse usage-error path
+        # (exit 2, stderr names --bind) before any socket exists
+        for value in ("224.0.0.1", "239.255.255.255",   # multicast 224/4
+                      "255.255.255.255",                # broadcast
+                      "240.0.0.1",                      # reserved 240/4
+                      "0.0.0.1",                        # 0/8 beyond 0.0.0.0
+                      "not-an-ip", "1.2.3", "999.0.0.1",
+                      "::1"):
+            box = Sandbox()
+            try:
+                done = self.run_serve(["--runs", box.runs, "--ledger",
+                                       box.ledger, "--port", "0",
+                                       "--bind", value])
+                self.assertEqual(done.returncode, 2, value)
+                self.assertIn(b"usage:", done.stderr, value)
+                self.assertIn(b"error: --bind", done.stderr, value)
+                self.assertNotIn(b"SERVE", done.stdout)
+            finally:
+                box.cleanup()
+
+    def test_bind_zero_address_accepted_at_argument_level(self):
+        # 0.0.0.0 passes --bind validation: the run proceeds past
+        # argument parsing and dies later on the recorded --runs check
+        # ("--runs is not an existing directory", not a bind error).
+        # Asserted without opening any socket.
         box = Sandbox()
         try:
-            done = self.run_serve(["--runs", box.runs, "--ledger",
-                                   box.ledger, "--port", "0",
+            done = self.run_serve(["--runs", os.path.join(box.root, "nope"),
+                                   "--ledger", box.ledger, "--port", "0",
                                    "--bind", "0.0.0.0"])
             self.assertEqual(done.returncode, 2)
             self.assertNotIn(b"SERVE", done.stdout)
+            stderr = done.stderr.decode("utf-8", "replace")
+            self.assertIn("--runs is not an existing directory", stderr)
+            self.assertNotIn("error: --bind", stderr)
         finally:
             box.cleanup()
 
@@ -691,6 +723,36 @@ class StartupFailClosed(unittest.TestCase):
             self.assertEqual(done.returncode, 2)
         finally:
             box.cleanup()
+
+
+class BindAddressSuite(unittest.TestCase):
+    """--bind with a concrete unicast address (README §1/§5): the SERVE
+    line names the bound address, the socket really listens on it, and
+    SIGTERM still ends the server cleanly with no residue."""
+
+    def setUp(self):
+        self.box = Sandbox()
+        self.addCleanup(self.box.cleanup)
+        self.server = ServerProc(self.box, bind="127.0.0.2")
+        self.addCleanup(self.reap_server)
+
+    def reap_server(self):
+        code, _ = self.server.stop()
+        self.assertEqual(code, 0, "serve.py did not exit 0 on SIGTERM")
+        self.server.assert_gone()
+
+    def test_serve_line_and_listener_follow_bind_127_0_0_2(self):
+        self.assertEqual(self.server.bind, "127.0.0.2")
+        self.assertGreater(self.server.port, 0)
+        self.assertLess(self.server.port, 65536)
+        # a loopback GET through 127.0.0.2 proves the socket is bound
+        # to the requested address, not merely announced
+        status, body, raw, headers = self.server.get_json("/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"],
+                         "application/json; charset=utf-8")
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertEqual(body["sessions"]["count"], 0)
 
 
 if __name__ == "__main__":
