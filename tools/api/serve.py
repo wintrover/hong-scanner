@@ -11,7 +11,10 @@ of recorded markers and operator-recorded verify output). Running the
 Nim verify binary is outside this process's scope, always.
 
 Security boundaries (README §5):
-  - binds 127.0.0.1 only; there is no option to bind anything else;
+  - binds 127.0.0.1 by default; --bind takes a concrete IPv4 unicast
+    address or 0.0.0.0 (container behind the platform ingress only —
+    README §1/§5); multicast, broadcast and every non-IPv4 string are
+    refused before any socket exists;
   - GET only — every other method is a JSON 405;
   - identifiers are validated before any path is built (event ids must
     be 64 lowercase hex digits, session ids must name an existing run
@@ -28,6 +31,7 @@ Python 3.13, standard library only (http.server). No new dependencies.
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -38,6 +42,7 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
+# --bind default: a no-option call binds loopback only, as before.
 BIND_HOST = "127.0.0.1"
 
 EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -81,6 +86,29 @@ def canonical_bytes(obj):
 def _reason(exc):
     """A path-free reason string for error messages."""
     return getattr(exc, "strerror", None) or exc.__class__.__name__
+
+
+def resolve_bind(value):
+    """--bind validation (README §1/§5): a dotted-quad IPv4 unicast
+    address, or 0.0.0.0 (all interfaces — a container behind the
+    platform ingress only). Returns the address string, or None for a
+    refusal: multicast (224.0.0.0/4), the broadcast address
+    255.255.255.255, the reserved blocks (240.0.0.0/4 and 0.0.0.0/8
+    beyond 0.0.0.0 itself), and anything that is not four decimal
+    octets 0..255. The caller turns None into the argparse usage error
+    (exit 2); a well-formed address the OS cannot bind stays on the
+    existing bind-failure path (exit 4)."""
+    try:
+        addr = ipaddress.IPv4Address(value)
+    except ValueError:  # AddressValueError: not four 0..255 octets
+        return None
+    if addr == ipaddress.IPv4Address("0.0.0.0"):
+        return str(addr)
+    broadcast = ipaddress.IPv4Address("255.255.255.255")
+    if addr.is_multicast or addr == broadcast or addr.is_reserved \
+            or int(addr) >> 24 == 0:
+        return None
+    return str(addr)
 
 
 def sha256_file(path):
@@ -546,8 +574,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="serve.py",
         description="Hong Scanner read-only API — serves recorded facts "
-                    "from a runs directory and an event ledger on "
-                    "127.0.0.1 only.")
+                    "from a runs directory and an event ledger, bound "
+                    "to 127.0.0.1 by default.")
     parser.add_argument("--runs", required=True, metavar="DIR",
                         help="runs root directory (read-only)")
     parser.add_argument("--ledger", required=True, metavar="FILE",
@@ -555,11 +583,20 @@ def main(argv=None):
     parser.add_argument("--delivery", default=None, metavar="FILE",
                         help="delivery ledger JSONL (read-only, optional)")
     parser.add_argument("--port", required=True, type=int, metavar="N",
-                        help="TCP port on 127.0.0.1 (0 = ephemeral)")
+                        help="TCP port (0 = ephemeral)")
+    parser.add_argument("--bind", default=BIND_HOST, metavar="IP",
+                        help="IPv4 address to bind (default: 127.0.0.1; "
+                             "0.0.0.0 only for a container behind the "
+                             "platform ingress)")
     args = parser.parse_args(argv)
 
     if not (0 <= args.port <= 65535):
         parser.error("--port must be between 0 and 65535")
+    bind = resolve_bind(args.bind)
+    if bind is None:
+        parser.error("--bind must be a dotted-quad IPv4 unicast address "
+                     "or 0.0.0.0 (multicast, broadcast, reserved blocks "
+                     "and non-IPv4 strings are refused)")
     if not os.path.isdir(args.runs):
         sys.stderr.write("serve.py: --runs is not an existing directory\n")
         return 2
@@ -567,10 +604,10 @@ def main(argv=None):
     projector = Projector(args.runs, args.ledger, args.delivery)
     Handler.projector = projector
     try:
-        server = ThreadingHTTPServer((BIND_HOST, args.port), Handler)
+        server = ThreadingHTTPServer((bind, args.port), Handler)
     except OSError as exc:
         sys.stderr.write("serve.py: cannot bind %s:%d: %s\n"
-                         % (BIND_HOST, args.port, _reason(exc)))
+                         % (bind, args.port, _reason(exc)))
         return 4
     server.daemon_threads = True
 
@@ -579,7 +616,7 @@ def main(argv=None):
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
-    print("SERVE %s:%d" % (BIND_HOST, server.server_address[1]), flush=True)
+    print("SERVE %s:%d" % server.server_address, flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
