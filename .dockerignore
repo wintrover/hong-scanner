@@ -1,20 +1,34 @@
-# Build-context whitelist (tools/container/README.md §2/§4): the staged
-# context carries only what the Dockerfile COPYs — the Dockerfile, the
-# hongscanner binary, serve.py and the calendar INDEX. Everything else
-# is excluded. In particular the real calendars/*.json are gitignored
-# user data and never enter an image or a build context; only the
-# git-tracked calendars/CALENDAR_INDEX.sha256 passes.
+# Build-context whitelist (tools/container/README.md §2/§4/§8): the staged
+# context carries only what the Dockerfile COPYs — the Dockerfile, the two
+# binaries (hongscanner + collector), serve.py, the collector sidecar and
+# its pinned requirements, the four notify modules and the calendar INDEX.
+# Everything else is excluded. In particular the real calendars/*.json are
+# gitignored user data and never enter an image or a build context; only
+# the git-tracked calendars/CALENDAR_INDEX.sha256 passes. No credential
+# (APP_KEY_MOCK / APP_SECRET_MOCK / FCM service-account JSON) has a
+# whitelist entry: secrets are runtime Northflank Secret Group injections.
 *
 !Dockerfile
 !.dockerignore
 !bin
 bin/*
 !bin/hongscanner
+!bin/collector
 !tools
 tools/*
 !tools/api
 tools/api/*
 !tools/api/serve.py
+!tools/collector
+tools/collector/*
+!tools/collector/sidecar.py
+!tools/collector/requirements.txt
+!tools/notify
+tools/notify/*
+!tools/notify/notify_dispatcher.py
+!tools/notify/notify_config.py
+!tools/notify/notify_fcm.py
+!tools/notify/notify_ledger.py
 !calendars
 calendars/*
 !calendars/CALENDAR_INDEX.sha256

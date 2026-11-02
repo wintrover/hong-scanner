@@ -9,12 +9,21 @@
 ## docker-less environment FAILS the gate — that is the documented
 ## contract (README §6), not a limitation to route around.
 ##
-## The image under test is a TEST artifact: it carries a locally
-## compiled binary (the same nim c pattern as tests/test_cli_contract.sh)
-## and therefore the org.hongscanner.image-purpose=ci-test
+## The image under test is a TEST artifact: it carries locally compiled
+## binaries (the same nim c pattern as tests/test_cli_contract.sh for
+## hongscanner and tests/test_collector_pipe_contract.sh for the
+## collector) and therefore the org.hongscanner.image-purpose=ci-test
 ## not-for-deployment marker. The production image (PR-5: attested
-## CI_BUILD_OUT binary through the same staged context, no marker) is a
+## CI_BUILD_OUT binaries through the same staged context, no marker) is a
 ## separate artifact this suite never builds or uses.
+##
+## PR-5 image contents (tools/container/README.md §8): besides the
+## hongscanner binary the staged context carries the collector binary,
+## sidecar.py (colocated with it: collector.nim resolves the sidecar
+## script next to its own binary), requirements.txt and the four notify
+## modules; the in-image asserts cover the collector (exec bit, byte
+## identity), the sidecar/notify layout, $HSCOLLECTOR_PYTHON=python3 and
+## the one pinned sidecar dependency (websockets==17.3 importable).
 ##
 ## Calendars: the git-tracked calendars/CALENDAR_INDEX.sha256 is staged
 ## and asserted byte-identical in the image; the real calendars/*.json
@@ -109,18 +118,38 @@ echo "compiling test binary from $REPO_ROOT/src"
     echo "FAIL test binary does not compile:"; cat "$SANDBOX/compile.log"; exit 1; }
 echo "ok   test binary compiles"; PASS=$((PASS + 1))
 
+# ---------------------------------------------------- test collector (the
+# tests/test_collector_pipe_contract.sh compile pattern: same -d:release
+# nim c into the sandbox, its own nimcache, never the repo-root build).
+CBIN="$SANDBOX/collector"
+echo "compiling test collector from $REPO_ROOT/tools/collector"
+(cd "$REPO_ROOT" && nim c -d:release --hints:off --warnings:off \
+  --path:"$REPO_ROOT/src" --nimcache:"$SANDBOX/nimcache-collector" \
+  -o:"$CBIN" tools/collector/collector.nim) > "$SANDBOX/compile-collector.log" 2>&1 || {
+    echo "FAIL test collector does not compile:"; cat "$SANDBOX/compile-collector.log"; exit 1; }
+echo "ok   test collector compiles"; PASS=$((PASS + 1))
+
 # ---------------------------------------------------- staged build
 # context (README §2): the builder copies the needed files into a fresh
 # directory and builds THAT as the context — a Docker COPY can never
 # reach outside the context. .dockerignore travels with the context.
 CTX="$SANDBOX/context"
-mkdir -p "$CTX/bin" "$CTX/tools/api" "$CTX/calendars"
+mkdir -p "$CTX/bin" "$CTX/tools/api" "$CTX/tools/collector" \
+         "$CTX/tools/notify" "$CTX/calendars"
 cp "$REPO_ROOT/Dockerfile" "$CTX/Dockerfile"
 cp "$REPO_ROOT/.dockerignore" "$CTX/.dockerignore"
 cp "$REPO_ROOT/tools/api/serve.py" "$CTX/tools/api/serve.py"
 cp "$REPO_ROOT/calendars/CALENDAR_INDEX.sha256" \
    "$CTX/calendars/CALENDAR_INDEX.sha256"
 cp "$BIN" "$CTX/bin/hongscanner"
+cp "$CBIN" "$CTX/bin/collector"
+cp "$REPO_ROOT/tools/collector/sidecar.py" "$CTX/tools/collector/sidecar.py"
+cp "$REPO_ROOT/tools/collector/requirements.txt" \
+   "$CTX/tools/collector/requirements.txt"
+for f in notify_dispatcher.py notify_config.py notify_fcm.py \
+         notify_ledger.py; do
+  cp "$REPO_ROOT/tools/notify/$f" "$CTX/tools/notify/$f"
+done
 assert_file_in_context() { # desc path
   if [ -f "$2" ]; then
     echo "ok   $1"; PASS=$((PASS + 1))
@@ -134,6 +163,14 @@ assert_file_in_context "staged serve.py" "$CTX/tools/api/serve.py"
 assert_file_in_context "staged CALENDAR_INDEX.sha256" \
   "$CTX/calendars/CALENDAR_INDEX.sha256"
 assert_file_in_context "staged test binary" "$CTX/bin/hongscanner"
+assert_file_in_context "staged test collector" "$CTX/bin/collector"
+assert_file_in_context "staged sidecar.py" "$CTX/tools/collector/sidecar.py"
+assert_file_in_context "staged requirements.txt" \
+  "$CTX/tools/collector/requirements.txt"
+for f in notify_dispatcher.py notify_config.py notify_fcm.py \
+         notify_ledger.py; do
+  assert_file_in_context "staged tools/notify/$f" "$CTX/tools/notify/$f"
+done
 assert_eq "no calendar json in the staged context" 0 \
   "$(find "$CTX/calendars" "$CTX" -maxdepth 1 -name '*.json' | wc -l)"
 
@@ -263,12 +300,20 @@ docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" -c '
 set -e
 test -f /opt/hongscanner/serve.py
 test -x /opt/hongscanner/bin/hongscanner
+test -x /opt/hongscanner/bin/collector
+test -f /opt/hongscanner/bin/sidecar.py
+test -f /opt/hongscanner/tools/collector/requirements.txt
+test -f /opt/hongscanner/tools/notify/notify_dispatcher.py
+test -f /opt/hongscanner/tools/notify/notify_config.py
+test -f /opt/hongscanner/tools/notify/notify_fcm.py
+test -f /opt/hongscanner/tools/notify/notify_ledger.py
 test -f /opt/hongscanner/CALENDAR_INDEX.sha256
 test ! -e /var/lib/hongscanner/notify/ledger.hcj.jsonl
 [ -z "$(find /opt/hongscanner -name "*.json")" ]
 [ "$(id -u)" -ne 0 ]
+[ "$(printenv HSCOLLECTOR_PYTHON)" = "python3" ]
 ' || RC=$?
-assert_eq "in-image layout: serve.py + executable binary + baked INDEX, no baked ledger, no calendar json, non-root uid" \
+assert_eq "in-image layout: serve.py + executable binaries + collector-sidecar-notify files + baked INDEX, no baked ledger, no calendar json, non-root uid, HSCOLLECTOR_PYTHON=python3" \
   0 "$RC"
 HOST_INDEX_SHA="$(sha256sum "$REPO_ROOT/calendars/CALENDAR_INDEX.sha256" \
   | cut -d' ' -f1)"
@@ -281,6 +326,38 @@ IMG_BIN_SHA="$(docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" \
   -c 'sha256sum /opt/hongscanner/bin/hongscanner' | cut -d' ' -f1)"
 assert_eq "the image carries exactly the staged test binary" \
   "$HOST_BIN_SHA" "$IMG_BIN_SHA"
+HOST_COL_SHA="$(sha256sum "$CTX/bin/collector" | cut -d' ' -f1)"
+IMG_COL_SHA="$(docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" \
+  -c 'sha256sum /opt/hongscanner/bin/collector' | cut -d' ' -f1)"
+assert_eq "the image carries exactly the staged collector binary" \
+  "$HOST_COL_SHA" "$IMG_COL_SHA"
+
+# Sidecar dependency contract: python3 in the image imports
+# websockets==17.3 — the only pip-installed package, the exact version
+# whose wire behavior is the measured contract
+# (tools/collector/requirements.txt).
+RC=0
+docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" -c '
+python3 -c "import websockets" || exit 1
+python3 - <<PY
+import importlib.metadata as m
+v = m.version("websockets")
+assert v == "17.3", v
+print("websockets", v)
+PY
+' > "$SANDBOX/img-websockets.txt" 2>&1 || RC=$?
+assert_eq "in-image python3 imports websockets==17.3 (the only sidecar dependency)" \
+  0 "$RC"
+assert_contains "the version check named 17.3 inside the image" \
+  "$(cat "$SANDBOX/img-websockets.txt")" "websockets 17.3"
+
+# Collector usage smoke (README §8 mirror of attest.yml): no args is a
+# usage error by contract (collector exit codes: 2 = usage), which proves
+# the binary executes in-image as the non-root user.
+IMG_USAGE_RC="$(docker run --rm --entrypoint /bin/sh "$IMAGE_TAG" \
+  -c '/opt/hongscanner/bin/collector >/dev/null 2>&1; echo $?')"
+assert_eq "in-image collector no-args exits 2 (usage contract)" \
+  2 "$IMG_USAGE_RC"
 
 # ------------------------------------------------------------- run
 echo "--- container run (fixture volumes, loopback-published port)"

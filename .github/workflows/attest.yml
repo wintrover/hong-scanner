@@ -1,6 +1,6 @@
 name: attest
 
-## Attested release binary — GitHub `main` pushes only.
+## Attested release binaries and image — GitHub `main` pushes only.
 ##
 ## Trigger: `push` to `refs/heads/main`, nothing else. No workflow_dispatch,
 ## no pull_request event can produce an attested artifact from this workflow.
@@ -24,25 +24,64 @@ name: attest
 ##   5. binary check — doctor must report BUILD/GIT lines that match the
 ##                     runner's real git state, and selftest must pass on the
 ##                     committed fixture. No user data (calendars, runs) is
-##                     needed or read.
+##                     needed or read;
+##   6. collector     — the second ci_build.sh subject (collector-linux-<arch>)
+##                     is attested the same way and uploaded under its own
+##                     artifact names, after the hongscanner binary is
+##                     attested and uploaded;
+##   7. image build   — ghcr.io login (github.actor + github.token), buildx,
+##                     a mktemp STAGED context (the two attested
+##                     CI_BUILD_OUT binaries + tracked repo files, the PR-2
+##                     staging contract byte-identity asserted), then one
+##                     `docker buildx build --push` of
+##                     ghcr.io/wintrover/hongscanner:main-<sha7> — the
+##                     immutable tag convention: one push per exact main
+##                     SHA, a version tag is never overwritten, `latest` is
+##                     never produced. NO deployment step follows: CD is
+##                     explicitly out of scope, Northflank placement is a
+##                     manual step on a specific version tag
+##                     (tools/container/README.md §8);
+##   8. image attest  — SLSA provenance on the PUSHED IMAGE DIGEST:
+##                     subject-name is the registry FQDN WITHOUT the tag
+##                     (tags are mutable, digests are not), subject-digest
+##                     is the build-push-action digest output, and
+##                     push-to-registry links it so
+##                     `gh attestation verify oci://ghcr.io/wintrover/
+##                     hongscanner@sha256:<digest>` resolves it (registry
+##                     auth needed for that read).
 ##
-## Path invariant: exactly one binary path exists in this job,
-## <CI_BUILD_OUT>/hongscanner, created once by tools/ci_build.sh and used
-## identically by every consumer — doctor, selftest, the attestation subject,
-## the checksum, the build report and the artifact uploads. CI_BUILD_OUT is a
-## unique empty directory under RUNNER_TEMP, created once by mktemp(1) and
-## exported once through GITHUB_ENV and the `builddir` step output; staging
-## asserts both channels carry the same path. Nothing in this job writes
-## inside the repository checkout (the only in-repo writes are the repo's own
-## gitignored `nimble test` outputs, identical to the ci workflow), and no
-## existing file anywhere is ever overwritten — so a local canonical
-## repo-root ./hongscanner can never be clobbered, and no test artifact can
-## be mistaken for the attested binary.
+## Path invariant: exactly two binary paths exist in this job,
+## <CI_BUILD_OUT>/hongscanner and <CI_BUILD_OUT>/collector, both created
+## once by tools/ci_build.sh and each used identically by every consumer —
+## doctor/selftest (hongscanner), the usage smoke (collector), the
+## attestation subjects, the checksums, the build reports, the artifact
+## uploads and the image staging. CI_BUILD_OUT is a unique empty directory
+## under RUNNER_TEMP, created once by mktemp(1) and exported once through
+## GITHUB_ENV and the `builddir` step output; staging asserts both channels
+## carry the same path. Nothing in this job writes inside the repository
+## checkout (the only in-repo writes are the repo's own gitignored
+## `nimble test` outputs, identical to the ci workflow), and no existing
+## file anywhere is ever overwritten — so a local canonical repo-root
+## ./hongscanner can never be clobbered, and no test artifact can be
+## mistaken for an attested binary.
 ##
-## Then actions/attest-build-provenance signs a SLSA provenance statement for
-## the binary with this job's OIDC identity and records it on this repository
-## (digest <-> repo <-> exact main SHA <-> this run). The binary, its sha256,
-## the attestation bundle and a build report are retained as artifacts.
+## Phase ordering invariant (PR-5): every image/GHCR step comes strictly
+## AFTER the hongscanner attestation, the collector attestation and their
+## artifact uploads. The local reinstall path (tools/install-attested.sh:
+## binary artifact + repository attestation) therefore never depends on
+## the image path — a build/push/attest-image failure leaves the binary
+## evidence recorded. Failures are still failures: the job ends red, no
+## image-phase error is swallowed or downgraded.
+##
+## Then actions/attest-build-provenance signs SLSA provenance statements
+## with this job's OIDC identity and records them on this repository
+## (digest <-> repo <-> exact main SHA <-> this run): one for each binary
+## (hongscanner-linux-<arch>, collector-linux-<arch>) and one for the
+## pushed image digest (subject-name ghcr.io/wintrover/hongscanner,
+## push-to-registry). The binaries, their sha256s, the attestation
+## bundles and build reports are retained as artifacts (separate names
+## per subject); the image is retained on GHCR under the immutable
+## main-<sha7> tag whose bytes the digest attestation pins.
 ##
 ## Why not `workflow_run`: it fires for every completed run of `ci` (including
 ## fork pull_request runs, needing extra guards) and its `github.sha` is the
@@ -62,11 +101,16 @@ name: attest
 ##     the attestation adds is a GitHub-signed binding of the binary digest
 ##     to this repository, the exact main SHA and this workflow run.
 ##   - External actions are pinned to full commit SHAs resolved from
-##     api.github.com on 2026-10-29 (lightweight tags -> commits):
+##     api.github.com (lightweight tags -> commits; docker/* resolved the
+##     same way on 2026-11-02):
 ##       actions/checkout               v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
 ##       jiro4989/setup-nim-action      v2.3.1  189b145833368cc92f1e7b3e166a25a3e057a693
+##       actions/setup-python           v5      a26af69be951a213d495a4c3e4e4022e16d87065
 ##       actions/attest-build-provenance v4.2.2 4d101475d8b20a2381f78447822ac1eab6504dd8
 ##       actions/upload-artifact        v7.0.2  cf430e030ddbb5b0abf93d22962f4752f3646cd9
+##       docker/login-action            v4.7.0  81c6f93d4bc991e510b342a00b419b3bb4efc5c6
+##       docker/setup-buildx-action     v4.4.1  f87e5991a6d7451dcb8d9637bfbc97413f497069
+##       docker/build-push-action       v7.4.0  c3c9e263c25d99ce0380d002d59b67737d91b0dc
 ##     Their internals still execute inside this job and remain trusted code.
 ##   - The CI gate reads this public repository's Actions data with the job
 ##     token (contents: read only; the REST docs allow the workflow-runs
@@ -88,13 +132,14 @@ permissions: {}
 
 jobs:
   attest:
-    name: attested release binary (main push)
+    name: attested release binaries + image (main push)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
       attestations: write
+      packages: write   # ghcr.io push (docker/login-action + build-push-action)
     env:
       EXPECTED_SHA: ${{ github.sha }}
     steps:
@@ -223,6 +268,27 @@ jobs:
           # smoke run deliberately records fixture provenance
           # (tests/test_cli_contract.sh asserts the same for dev builds).
 
+      - name: Smoke-run the collector binary on its usage contract (no live vendor)
+        run: |
+          set -euo pipefail
+          col="${CI_BUILD_OUT}/collector"
+          [ -x "$col" ] || { echo "REFUSED: ${col} is missing" >&2; exit 1; }
+          out="$(mktemp "${RUNNER_TEMP}/hs-collector-smoke.XXXXXXXX")"
+          rc=0
+          "$col" > "$out" 2>&1 || rc=$?
+          # No args is a usage error by contract (tools/collector exit
+          # codes: 0 normal, 2 usage, 4 INCOMPLETE) and the usage text
+          # names the required flags. Anything else refuses the run.
+          if [ "$rc" -ne 2 ]; then
+            echo "REFUSED: collector no-args exit=$rc (expected 2)" >&2
+            cat "$out" >&2 || true
+            exit 1
+          fi
+          printf '%s\n' "$(cat "$out")"
+          grep -F 'collector --profile' "$out" >/dev/null \
+            || { echo "REFUSED: usage text is missing the required flags" >&2; exit 1; }
+          rm -f "$out"
+
       - name: Determine platform tag for artifact naming
         id: platform
         run: |
@@ -302,5 +368,230 @@ jobs:
         with:
           name: hongscanner-${{ steps.platform.outputs.tag }}-attestation
           path: ${{ steps.builddir.outputs.out }}/attestation/
+          retention-days: 90
+          if-no-files-found: error
+
+      # ------------------------------------------------------------ PR-5
+      # collector subject: same attestation action, separate subject and
+      # artifact names. The sidecar's only third-party dependency
+      # (websockets==17.3) is version-pinned in the committed
+      # tools/collector/requirements.txt the image installs verbatim.
+      - name: Attest the collector binary (SLSA build provenance, OIDC-signed)
+        id: attest-collector
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.builddir.outputs.out }}/collector
+          subject-name: collector-${{ steps.platform.outputs.tag }}
+
+      - name: Stage collector checksums, attestation bundle and build report
+        env:
+          BUNDLE_PATH: ${{ steps.attest-collector.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest-collector.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest-collector.outputs.attestation-url }}
+          PLATFORM_TAG: ${{ steps.platform.outputs.tag }}
+          OUT_DECLARED: ${{ steps.builddir.outputs.out }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CI_BUILD_OUT" ] || [ "$CI_BUILD_OUT" != "$OUT_DECLARED" ]; then
+            echo "REFUSED: path channels diverged: CI_BUILD_OUT='${CI_BUILD_OUT}' builddir.out='${OUT_DECLARED}'" >&2
+            exit 1
+          fi
+          if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
+            echo "REFUSED: collector attestation bundle missing at '${BUNDLE_PATH}'" >&2
+            exit 1
+          fi
+          if [ -e "${CI_BUILD_OUT}/collector.sha256" ] || [ -e "${CI_BUILD_OUT}/collector-attestation" ]; then
+            echo "REFUSED: refusing to overwrite existing files in ${CI_BUILD_OUT}" >&2
+            exit 1
+          fi
+          ( cd "$CI_BUILD_OUT" && sha256sum collector > collector.sha256 )
+          mkdir "${CI_BUILD_OUT}/collector-attestation"
+          cp "$BUNDLE_PATH" \
+            "${CI_BUILD_OUT}/collector-attestation/collector.attestation.bundle.json"
+          digest="$(sha256sum "${CI_BUILD_OUT}/collector" | cut -d' ' -f1)"
+          {
+            echo "collector attested release build (PR-5 second subject)"
+            echo "subject name:    collector-${PLATFORM_TAG}"
+            echo "subject digest:  sha256:${digest}"
+            echo "built binary:    ${CI_BUILD_OUT}/collector (isolated runner-temp dir)"
+            echo "main sha:        ${EXPECTED_SHA} (HEAD == re-fetched origin/main, tools/ci_build.sh)"
+            echo "commit:          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${EXPECTED_SHA}"
+            echo "workflow run:    ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "ci gate:         workflow 'ci' success on ${EXPECTED_SHA}: ${CI_RUN_URL:-<unrecorded>}"
+            echo "event/ref:       ${GITHUB_EVENT_NAME} / ${GITHUB_REF}"
+            echo "runner:          ${RUNNER_NAME} $(uname -srm)"
+            echo "nim:             $(nim --version | head -1)"
+            echo "binary sha256:   ${digest}  collector"
+            echo "attestation id:  ${ATTESTATION_ID:-}"
+            echo "attestation url: ${ATTESTATION_URL:-}"
+            echo "verify later:    gh attestation verify collector --repo ${GITHUB_REPOSITORY}"
+          } > "${CI_BUILD_OUT}/collector-attestation/collector-build-report.txt"
+          cat "${CI_BUILD_OUT}/collector-attestation/collector-build-report.txt"
+
+      - name: Upload attested collector + sha256 (90 days, public-repo cap)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: collector-${{ steps.platform.outputs.tag }}
+          path: |
+            ${{ steps.builddir.outputs.out }}/collector
+            ${{ steps.builddir.outputs.out }}/collector.sha256
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload collector attestation bundle + build report (90 days, public-repo cap)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: collector-${{ steps.platform.outputs.tag }}-attestation
+          path: ${{ steps.builddir.outputs.out }}/collector-attestation/
+          retention-days: 90
+          if-no-files-found: error
+
+      # ------------------------------------------------- image phase
+      # Everything below is deliberately AFTER the binary attestations and
+      # their artifact uploads: the local reinstall path
+      # (tools/install-attested.sh) never depends on the image path. A
+      # failure below still fails the job — nothing is swallowed.
+      # CD policy: NO deployment step exists in this workflow, and no
+      # `latest` tag is ever produced (immutable main-<sha7> convention).
+
+      - name: Login to GHCR (github.actor + github.token)
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Set up Buildx (container driver: registry push + digest output)"
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Stage the image build context (attested binaries + tracked files)
+        id: imagectx
+        run: |
+          set -euo pipefail
+          ctx="$(mktemp -d "${RUNNER_TEMP}/hs-image-ctx.XXXXXXXX")"
+          mkdir -p "$ctx/bin" "$ctx/tools/api" "$ctx/tools/collector" \
+                   "$ctx/tools/notify" "$ctx/calendars"
+          cp Dockerfile "$ctx/Dockerfile"
+          cp .dockerignore "$ctx/.dockerignore"
+          cp tools/api/serve.py "$ctx/tools/api/serve.py"
+          cp calendars/CALENDAR_INDEX.sha256 "$ctx/calendars/CALENDAR_INDEX.sha256"
+          cp tools/collector/sidecar.py "$ctx/tools/collector/sidecar.py"
+          cp tools/collector/requirements.txt \
+             "$ctx/tools/collector/requirements.txt"
+          for f in notify_dispatcher.py notify_config.py notify_fcm.py \
+                   notify_ledger.py; do
+            cp "tools/notify/$f" "$ctx/tools/notify/$f"
+          done
+          # The staged binaries ARE the attested CI_BUILD_OUT binaries:
+          # byte identity is asserted here, not assumed (README §2/§8).
+          cp "${CI_BUILD_OUT}/hongscanner" "$ctx/bin/hongscanner"
+          cp "${CI_BUILD_OUT}/collector" "$ctx/bin/collector"
+          hs_want="$(sha256sum "${CI_BUILD_OUT}/hongscanner" | cut -d' ' -f1)"
+          hs_got="$(sha256sum "$ctx/bin/hongscanner" | cut -d' ' -f1)"
+          col_want="$(sha256sum "${CI_BUILD_OUT}/collector" | cut -d' ' -f1)"
+          col_got="$(sha256sum "$ctx/bin/collector" | cut -d' ' -f1)"
+          if [ "$hs_want" != "$hs_got" ] || [ "$col_want" != "$col_got" ]; then
+            echo "REFUSED: staged binaries differ from CI_BUILD_OUT (hongscanner ${hs_want} != ${hs_got}, collector ${col_want} != ${col_got})" >&2
+            exit 1
+          fi
+          # Calendar trust boundary (README §4): only the git-tracked
+          # INDEX may reach the image; any calendar json in the staged
+          # context is a refusal, exactly like the container contract test.
+          if [ -n "$(find "$ctx/calendars" -name '*.json' -print -quit)" ]; then
+            echo "REFUSED: a calendar json reached the staged image context" >&2
+            exit 1
+          fi
+          # Immutable tag convention: exactly one tag, main-<sha7>, tied to
+          # this exact main SHA. No latest, no mutable version tag.
+          tag="main-$(printf '%s' "${EXPECTED_SHA}" | cut -c1-7)"
+          echo "ctx=${ctx}" >> "$GITHUB_OUTPUT"
+          echo "image-tag=ghcr.io/${GITHUB_REPOSITORY}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "staged image context: ${ctx}"
+          echo "image tag: ghcr.io/${GITHUB_REPOSITORY}:${tag}"
+
+      - name: Build and push the production image to GHCR (immutable main-<sha7>)
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.imagectx.outputs.ctx }}
+          push: true
+          tags: ${{ steps.imagectx.outputs.image-tag }}
+          # No BuildKit-embedded provenance/sbom manifests: the SLSA
+          # evidence for this image is the repository-level attestation on
+          # the pushed digest below, and a single-config manifest keeps
+          # that digest unambiguous. NO ci-test label: the production image
+          # carries no org.hongscanner.image-purpose marker (README §3).
+          provenance: false
+          sbom: false
+
+      - name: Verify the pushed digest (fail-closed before attesting it)
+        env:
+          IMAGE_REF: ${{ steps.imagectx.outputs.image-tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$IMAGE_DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$' || {
+            echo "REFUSED: image digest='${IMAGE_DIGEST}' is not sha256:<64 hex>" >&2
+            exit 1
+          }
+          echo "IMAGE OK ref=${IMAGE_REF} digest=${IMAGE_DIGEST}"
+
+      - name: Attest the pushed image digest (SLSA provenance on the GHCR subject)
+        id: attest-image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # subject-name is the registry FQDN WITHOUT the tag (tags are
+          # mutable; the digest is the identity), subject-digest is the
+          # digest output of the push above, and push-to-registry binds
+          # the attestation so `gh attestation verify oci://...` resolves
+          # it (that read needs registry auth).
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Stage image attestation bundle and build report
+        env:
+          BUNDLE_PATH: ${{ steps.attest-image.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest-image.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest-image.outputs.attestation-url }}
+          IMAGE_REF: ${{ steps.imagectx.outputs.image-tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
+            echo "REFUSED: image attestation bundle missing at '${BUNDLE_PATH}'" >&2
+            exit 1
+          fi
+          if [ -e "${CI_BUILD_OUT}/image-attestation" ]; then
+            echo "REFUSED: refusing to overwrite existing ${CI_BUILD_OUT}/image-attestation" >&2
+            exit 1
+          fi
+          mkdir "${CI_BUILD_OUT}/image-attestation"
+          cp "$BUNDLE_PATH" \
+            "${CI_BUILD_OUT}/image-attestation/image.attestation.bundle.json"
+          {
+            echo "production image attestation (PR-5)"
+            echo "image ref:       ${IMAGE_REF}"
+            echo "tag policy:      immutable main-<sha7> convention (one push per exact main SHA, never overwritten, no latest)"
+            echo "image digest:    ${IMAGE_DIGEST}"
+            echo "subject name:    ghcr.io/${GITHUB_REPOSITORY}"
+            echo "main sha:        ${EXPECTED_SHA} (both attested binaries and this image build from the same SHA)"
+            echo "commit:          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${EXPECTED_SHA}"
+            echo "workflow run:    ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "ci gate:         workflow 'ci' success on ${EXPECTED_SHA}: ${CI_RUN_URL:-<unrecorded>}"
+            echo "event/ref:       ${GITHUB_EVENT_NAME} / ${GITHUB_REF}"
+            echo "runner:          ${RUNNER_NAME} $(uname -srm)"
+            echo "attestation id:  ${ATTESTATION_ID:-}"
+            echo "attestation url: ${ATTESTATION_URL:-}"
+            echo "verify later:    gh attestation verify oci://ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST} --repo ${GITHUB_REPOSITORY}"
+            echo "CD policy:       no automatic deployment in this workflow; Northflank placement is a manual step on a specific version tag (tools/container/README.md §8)"
+          } > "${CI_BUILD_OUT}/image-attestation/image-build-report.txt"
+          cat "${CI_BUILD_OUT}/image-attestation/image-build-report.txt"
+
+      - name: Upload image attestation bundle + build report (90 days, public-repo cap)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hongscanner-image-attestation
+          path: ${{ steps.builddir.outputs.out }}/image-attestation/
           retention-days: 90
           if-no-files-found: error

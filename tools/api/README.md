@@ -135,11 +135,19 @@ ledger**다. 런 디렉터리의 `events.hcj.jsonl`은 검증 엔드포인트에
   상태의 합계다(delivery ledger 문서와 같은 last-record-wins 규칙).
   `configured`는 `--delivery` 지정 여부, `present`는 파일 존재다.
 - `events.latest_*`는 ledger 파일 순서의 마지막 이벤트에서 온다.
+- **존재하지만 커밋된 레코드가 0개인 ledger**(단일 작성자가 `O_CREAT`로
+  파일을 연 뒤 첫 기록 전 — notify 워커 기동 직후가 정확히 이 상태다)는
+  `ledger_present: true`·`count: 0`·빈 `by_type`/`by_severity`·
+  `latest_*: null`로 투영한다. 크래시도, 파일 부재(`ledger_present:
+  false`, `count: null`)와의 혼동도 아니다: 기록 권위 파일은 존재하고
+  이벤트가 아직 없다는 정직한 상태다.
 
 ### 3.2 `GET /candidates` — 최신 세션의 CANDIDATE_* 이벤트
 
 "최신 세션"은 **ledger 마지막 이벤트의 session_id**다. 응답은 그
-session_id의 `CANDIDATE_ENTERED|UPDATED|EXITED` 팩트만 담는다:
+session_id의 `CANDIDATE_ENTERED|UPDATED|EXITED` 팩트만 담는다. 빈
+ledger(§3.1의 0레코드 상태)에서는 `session_id: null`·`count: 0`·빈
+목록이다 — "최신 세션"이 없는 것이지 오류가 아니다:
 
 ```json
 {"count": 2, "events": [ {…팩트 원문 필드…}, … ],
