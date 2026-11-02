@@ -134,7 +134,10 @@ def read_committed_lines(path):
     trailing line without LF is a concurrently-appending record that
     has not been committed yet and is skipped, never half-consumed. A
     malformed COMMITTED line is a DataFault — corruption is not
-    skipped. Returns (objects, file_present)."""
+    skipped. An existing file with zero committed lines (its single
+    writer opened it with O_CREAT, no record yet) returns ([], True):
+    callers must project that state, never crash on it. Returns
+    (objects, file_present)."""
     try:
         with open(path, "rb") as f:
             data = f.read()
@@ -283,7 +286,10 @@ class Projector:
                                                        names[-1])))
         events, ledger_present = self._ledger_events()
         if ledger_present:
-            last = events[-1]
+            # A present-but-empty ledger (its single writer opened the
+            # file with O_CREAT before the first committed record) is an
+            # honest zero-count projection, never an IndexError (§3).
+            last = events[-1] if events else None
             events_block = {
                 "ledger_present": True,
                 "count": len(events),
@@ -291,11 +297,11 @@ class Projector:
                     ev["event_type"] for ev in events).items())),
                 "by_severity": dict(sorted(Counter(
                     ev["severity"] for ev in events).items())),
-                "latest_session_id": last["session_id"],
-                "latest_event": {k: last[k]
-                                 for k in ("event_id", "event_type",
-                                           "observed_at")
-                                 if k in last},
+                "latest_session_id": last["session_id"] if last else None,
+                "latest_event": ({k: last[k]
+                                  for k in ("event_id", "event_type",
+                                            "observed_at")
+                                  if k in last} if last else None),
             }
         else:
             events_block = {"ledger_present": False, "count": None,
@@ -330,6 +336,11 @@ class Projector:
         if not ledger_present:
             return {"ledger_present": False, "session_id": None,
                     "count": None, "events": None}
+        if not events:
+            # Same empty-ledger discipline as status(): a zero-record
+            # ledger projects an empty candidate list, never a crash.
+            return {"ledger_present": True, "session_id": None,
+                    "count": 0, "events": []}
         session_id = events[-1]["session_id"]
         chosen = [ev for ev in events
                   if ev["session_id"] == session_id

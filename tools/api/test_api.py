@@ -407,6 +407,48 @@ class ApiContractSuite(unittest.TestCase):
         self.assertEqual(body["events"], [])
         self.assertEqual(body["delivery"], {})
 
+    # -- present-but-empty ledger (README §3.1: the writer's O_CREAT
+    # opens the file before the first record — a real day-one state) ---
+
+    def truncate_event_ledger(self):
+        # Zero committed records in an EXISTING file: the notify worker
+        # opens the event ledger with O_CREAT when the session starts,
+        # so "file present, nothing recorded yet" is an operational
+        # state the projection must survive, never a 500.
+        with open(self.box.ledger, "wb"):
+            pass
+
+    def test_status_empty_ledger_projects_zero_count(self):
+        self.truncate_event_ledger()
+        status, body, _, _ = self.server.get_json("/status")
+        self.assertEqual(status, 200)
+        events = body["events"]
+        self.assertTrue(events["ledger_present"])
+        self.assertEqual(events["count"], 0)
+        self.assertEqual(events["by_type"], {})
+        self.assertEqual(events["by_severity"], {})
+        self.assertIsNone(events["latest_session_id"])
+        self.assertIsNone(events["latest_event"])
+        # run directories are independent of the ledger state
+        self.assertEqual(body["sessions"]["count"], 4)
+
+    def test_candidates_empty_ledger_has_no_latest_session(self):
+        self.truncate_event_ledger()
+        status, body, _, _ = self.server.get_json("/candidates")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"ledger_present": True,
+                                "session_id": None,
+                                "count": 0, "events": []})
+
+    def test_events_empty_ledger_lists_nothing(self):
+        self.truncate_event_ledger()
+        status, body, _, _ = self.server.get_json("/events")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ledger_present"])
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["events"], [])
+        self.assertEqual(body["delivery"], {})
+
     # -- /events/{id} --------------------------------------------------------
 
     def test_event_detail_with_and_without_delivery(self):
