@@ -254,6 +254,14 @@ auditable:
   capped by a declared page upper limit. If more pages remain when the cap
   is reached, the result is `truncated`: those pages are "not fetched",
   never "no more candidates". The cap is a scanner-side declaration.
+  A cap-closed chain is consumed by the acceptance path as a *declared
+  truncated subset*: the collector records the `rest_truncated` gap and
+  proceeds with the fetched pages (a truncated initial chain still derives
+  and registers — the session is not INCOMPLETE for the truncation
+  alone), the replay stream audit accepts the cap-closed round as
+  declared (below-cap `cont-yn=Y` stays a REJECT), and the event layer
+  never judges a partial universe into candidate events — the
+  `REST_TRUNCATED` fact (rest-truncated-v1) carries the truncation.
 - Each attempt is recorded as a `rest_resp` record that carries the
   declared request scope and the page index, so replay can audit what was
   asked for and what came back.

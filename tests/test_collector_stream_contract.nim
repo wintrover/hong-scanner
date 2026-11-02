@@ -186,6 +186,67 @@ block fullRun:
         "remove_acks_0b=1" in v.subcheckLine and
         "close_values=4" in v.subcheckLine)
 
+# ------------------------------------------- the truncated initial chain
+
+proc runTruncatedSession(): seq[RecOut] =
+  ## A full canned session whose initial chains both close at the declared
+  ## cap while cont-yn=Y (the live 2026-11-02 shape: the vendor returns
+  ## more than the cap in both directions): each cap-closing page records
+  ## the rest_truncated gap, the fetched pages still derive and REG, and
+  ## the session streams and closes normally.
+  var c = newCollector()
+  var outp = c.cfg.preambleRecords()
+  proc feed(line: string) =
+    var recs: seq[RecOut]
+    discard c.handleEvent(line, recs)
+    for r in recs: outp.add(r)
+  feed(ev("ready", ts))
+  feed(ev("conn", ts, ("conn", hInt(1)), ("state", hStr("open"))))
+  feed(evWs(1, ackPayload()))
+  for page in 1 .. 10:
+    feed(evRest("up", page, 200, "Y", "k" & $page,
+                restBody(@["0059" & align($page, 2, '0')])))
+  for page in 1 .. 10:
+    feed(evRest("down", page, 200, "Y", "k" & $page,
+                restBody(@["0006" & align($page, 2, '0')])))
+  feed(evWs(1, ackPayload()))
+  feed(evWs(1, tick0B(item = "005901", t20 = "090500", price = "10000",
+                      cum = "100")))
+  feed(evWs(1, tick0B(item = "000601", t20 = "090600", price = "20000",
+                      cum = "200")))
+  feed(evWs(1, state0S(value215 = "4")))
+  feed(evWs(1, ackPayload(trnm = "REMOVE", code = 0)))
+  return outp
+
+block truncatedRun:
+  let (dir, total) = sealStream(runTruncatedSession())
+  let recs = loadRecords(dir / inputFile)
+  check("the sealed truncated session has the seal as its last record",
+        isSealed(recs) and recs.len == total)
+  var gaps = 0
+  for r in recs:
+    if r.kind == kGap and r.raw.get("what").strVal == "rest_truncated":
+      inc gaps
+  check("both cap-closed legs recorded their rest_truncated gap",
+        gaps == 2)
+  let res = replayOf(dir)
+  check("a cap-closed declared truncated subset replays OK (the audit " &
+        "accepts the round, never a REJECT)", res.status == rsOk)
+  check("the 20 fetched pages all verified", res.restVerified == 20)
+  var nTrunc = 0
+  var nCand = 0
+  for e in res.events:
+    if "\"event_type\":\"REST_TRUNCATED\"" in e: inc nTrunc
+    if "\"event_type\":\"CANDIDATE_" in e: inc nCand
+  check("the two truncation facts are judged REST_TRUNCATED", nTrunc == 2)
+  check("a partial universe is never judged into candidate events",
+        nCand == 0)
+  check("the truncated-subset ticks built two bars", res.bars.len == 2)
+  let runDir = writeRunOf(dir, res)
+  let v = verifyOf(runDir)
+  check("verify declares MATCH on the truncated collector stream",
+        v.verdict == vMatch and v.matched)
+
 # --------------------------------------------------- the quarantined tick
 
 block quarantined:

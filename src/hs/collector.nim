@@ -78,6 +78,7 @@ type
     direction: Direction
     pages: seq[RawHttpResp]    ## pages of the chain in flight
     firstPages: seq[RawHttpResp] ## the completed opposite-direction pages
+    firstTruncated: bool       ## the completed up leg closed at the cap
 
   ColPhase* = enum
     phStart, phConnecting, phMarketReg, phInitialRest, phCandidateReg,
@@ -419,10 +420,12 @@ proc sameCand(a, b: UpDownCandidates): bool =
   sort(x.up, cmp); sort(x.down, cmp); sort(y.up, cmp); sort(y.down, cmp)
   x.up == y.up and x.down == y.down
 
-proc derive(c: var Collector; upPages, downPages: seq[RawHttpResp]): UpDownCandidates =
+proc derive(c: var Collector; upPages, downPages: seq[RawHttpResp];
+            upTruncated, downTruncated: bool): UpDownCandidates =
   let upChain = PageChain(query: c.cfg.queryOf(dirUp), pages: upPages)
   let downChain = PageChain(query: c.cfg.queryOf(dirDown), pages: downPages)
-  upDownCandidates(upChain, downChain, c.cfg.pageCap)
+  upDownCandidates(upChain, downChain, c.cfg.pageCap,
+                   upTruncated, downTruncated)
 
 proc restRespRecord(c: Collector; direction: Direction; page: int;
                     resp: RawHttpResp): RecOut =
@@ -559,8 +562,17 @@ proc handleAckPayload(c: var Collector; records: var seq[RecOut];
 proc chainAdvance(c: var Collector; records: var seq[RecOut];
                   resp: RawHttpResp; t: string): seq[Directive] =
   ## Cont-scan of the page chain currently being assembled. Truncation at
-  ## the declared cap is never a success (GATES: TRUNCATED≠성공).
+  ## the declared cap is never a success (GATES: TRUNCATED≠성공): the gap
+  ## record and the REST_TRUNCATED event (HIGH/INCOMPLETE) carry that.
+  ## A truncated POLL chain swaps nothing (streaming continues on the
+  ## old generation). A truncated INITIAL chain closes as a declared
+  ## truncated subset — the fetched pages feed the derivation and the
+  ## session proceeds (REPLAY_CONTRACT: those pages are "not fetched",
+  ## never "no more candidates") — live 2026-11-02: the vendor returns
+  ## more than the cap in both directions, so the initial observation
+  ## must not die at the cap.
   let page = c.chain.pages.len
+  var truncated = false
   if resp.contYn == "Y":
     if page >= c.cfg.pageCap:
       records.add(gapRecord("", "rest_truncated",
@@ -573,22 +585,23 @@ proc chainAdvance(c: var Collector; records: var seq[RecOut];
          of dirUp: "up"
          of dirDown: "down") & " chain): the declared " &
         "candidate subset is truncated — never success", t))
-      if c.chain.purpose == cpInitial:
-        return c.goIncomplete(records, t,
-          "the initial candidate chain is truncated at the declared page " &
-          "cap: the session's candidate derivation never completed")
-      c.chain = RestChain(purpose: cpNone, direction: dirUp)
-      c.phase = phStreaming
-      return @[]
-    result.add(Directive(kind: dkRestReq, direction: c.chain.direction,
-                         page: page + 1, contYn: "Y", nextKey: resp.nextKey))
-    return
-  # Terminal page: finish this chain. A terminal up chain (initial or
-  # poll) always opens the down leg first — the derivation needs both.
+      if c.chain.purpose != cpInitial:
+        c.chain = RestChain(purpose: cpNone, direction: dirUp)
+        c.phase = phStreaming
+        return @[]
+      truncated = true
+    else:
+      result.add(Directive(kind: dkRestReq, direction: c.chain.direction,
+                           page: page + 1, contYn: "Y", nextKey: resp.nextKey))
+      return
+  # Terminal page (or a cap-closed declared truncated subset): finish this
+  # chain. A terminal up chain (initial or poll) always opens the down leg
+  # first — the derivation needs both.
   let finished = c.chain
   if finished.direction == dirUp:
     c.chain = RestChain(purpose: finished.purpose, direction: dirDown,
-                        firstPages: finished.pages)
+                        firstPages: finished.pages,
+                        firstTruncated: truncated)
     result.add(Directive(kind: dkRestReq, direction: dirDown, page: 1,
                          contYn: "N", nextKey: ""))
     return
@@ -603,7 +616,7 @@ proc chainAdvance(c: var Collector; records: var seq[RecOut];
   c.chain = RestChain(purpose: cpNone, direction: dirUp)
   var cand: UpDownCandidates
   try:
-    cand = c.derive(upPages, downPages)
+    cand = c.derive(upPages, downPages, finished.firstTruncated, truncated)
   except VendorInputError as e:
     records.add(gapRecord("", "rest_chain",
       (case finished.purpose

@@ -346,7 +346,11 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
 config·calendar → `connect` → (conn open) → 0s REG req(별도,
 composeMarketStateReg, refresh="1") → ack → 초기 REST 조회(up 체인 →
 down 체인, cont-yn/core가 page_cap 내 반복) → 후보 도출(vendor_input,
-KRX) → 0B REG req(refresh="1") → ack → 스트리밍. 이후 `timer poll`마다
+KRX) → 0B REG req(refresh="1") → ack → 스트리밍. 상한 도달 시
+`gap`(rest_truncated)을 기록하고 조회된 페이지로 도출·REG를 진행한다
+(선언된 truncated 부분집합 — REPLAY_CONTRACT §12.1: 초과분은 "미조회",
+세션을 죽이지 않는다. 사실은 REST_TRUNCATED 이벤트가 담당). 이후
+`timer poll`마다
 재조회 → 후보 변화 시 스왑: REMOVE(구세대 전체)→ack(return_code 0)→
 REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 않는다
 (별도 REG, 구조적 배제 — sub_input.nim).

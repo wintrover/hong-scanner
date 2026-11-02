@@ -406,15 +406,15 @@ block chainRules:
            proc () = discard verifyAttempts(@[
              parseAttempt(3, attemptRaw(okBody(@[]), contYn = "Y",
                                         nextKey = "k"))]))
-  restUnit("chain: the cap reached while cont-yn=Y is truncated", vfTruncated,
-           "truncated",
-           proc () =
-             var xs: seq[RestRespAttempt]
-             for p in 1 .. defaultPageCap:
-               xs.add(parseAttempt(p + 2, attemptRaw(okBody(@[]), page = p,
-                                                     contYn = "Y",
-                                                     nextKey = $p)))
-             discard verifyAttempts(@xs))
+  block:
+    var xs: seq[RestRespAttempt]
+    for p in 1 .. defaultPageCap:
+      xs.add(parseAttempt(p + 2, attemptRaw(okBody(@[]), page = p,
+                                            contYn = "Y", nextKey = $p)))
+    let vt = verifyAttempts(@xs)
+    check("chain: a cap-closed round audits as a declared truncated subset " &
+          "(accepted, pages verified, truncation carried by the gap record)",
+          vt.len == defaultPageCap)
   restUnit("chain: a terminal page followed by more pages is rejected",
            vfContract, "more pages follow",
            proc () = discard verifyAttempts(@[

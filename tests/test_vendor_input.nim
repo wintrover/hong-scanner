@@ -282,6 +282,16 @@ block pagination:
   raisesVendorAs("truncated (at the cap) is distinct from incomplete (below)",
                  vfTruncated, proc () =
     discard normalizeChain(ka10027Spec, ch(dirUp, @[pg(pageBody(@[]), "Y", "K")]), 1))
+  checkNotRaises(
+    "truncatedOk consumes the cap-closed chain as a declared subset", proc () =
+      let evs = normalizeChain(ka10027Spec, ch(dirUp, @[p1, p2y]), 2,
+                               truncatedOk = true)
+      doAssert evs.len == 2)
+  raisesVendorAs(
+    "truncatedOk never waives a below-cap missing continuation page",
+    vfIncomplete, proc () =
+      discard normalizeChain(ka10027Spec, ch(dirUp, @[p1]), 2,
+                             truncatedOk = true))
   raisesVendor("a page cap below 1 is rejected", proc () =
     discard normalizeChain(ka10027Spec, ch(dirUp, @[p2]), 0))
 
@@ -431,6 +441,21 @@ block candidates:
                  proc () =
     discard upDownCandidates(ch(dirUp, @[p1u, pg(pageBody(@[]), "Y", "K")]),
                              ch(dirDown, @[downP]), 2))
+  checkNotRaises(
+    "upTruncated consumes a cap-closed up leg as a declared subset", proc () =
+      let ct = upDownCandidates(ch(dirUp, @[p1u, pg(pageBody(@[]), "Y", "K")]),
+                                ch(dirDown, @[downP]), 2, upTruncated = true)
+      doAssert ct.up == @["005930"] and ct.down == @["035420"])
+  raisesVendorAs(
+    "upTruncated never waives a below-cap missing continuation page",
+    vfIncomplete, proc () =
+      discard upDownCandidates(ch(dirUp, @[p1u]), ch(dirDown, @[downP]), 2,
+                               upTruncated = true))
+  raisesVendorAs(
+    "truncatedOk never waives a failed page (only the cap rule)", vfTransport,
+    proc () =
+      discard upDownCandidates(ch(dirUp, @[pg(pageBody(@[]), "Y", "K", 500)]),
+                               ch(dirDown, @[downP]), 1, upTruncated = true))
 
 # ---------------------------------------------------------------- ws identity
 

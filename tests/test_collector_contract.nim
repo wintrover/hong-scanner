@@ -532,7 +532,7 @@ block violations:
             discard c.handleEvent(evRest("up", 2, 200, "N", "",
               restBody(@["005930"])), r))
 
-# ------------------------------------------------- truncated poll chain
+# ------------------------------------------- truncated chains (poll / initial)
 
 block truncation:
   var c = newCollector()
@@ -558,6 +558,10 @@ block truncation:
   check("a truncated poll chain swaps nothing and keeps streaming",
         dirs.len == 0 and c.phase == phStreaming and not c.incomplete)
 
+  # A truncated INITIAL chain is a declared truncated subset: the gap
+  # record carries the truncation (never success), the fetched pages feed
+  # the derivation, and the session proceeds (REPLAY_CONTRACT §12.1: the
+  # pages beyond the cap are "not fetched", never "no more candidates").
   var c2 = newCollector()
   discard c2.step(ev("ready", ts))
   discard c2.step(ev("conn", ts, ("conn", hInt(1)), ("state", hStr("open"))))
@@ -566,9 +570,23 @@ block truncation:
   var dirs2: seq[Directive]
   for page in 1 .. 10:
     (recs2, dirs2) = c2.step(evRest("up", page, 200, "Y", "k" & $page,
-                                    restBody(@["005930"])))
-  check("a truncated INITIAL chain is INCOMPLETE (the derivation never " &
-        "completed)", c2.incomplete and dirs2.dirKinds() == @["stop"])
+                                    restBody(@["0059" & align($page, 2, '0')])))
+  check("a truncated INITIAL up chain records the gap and opens the down " &
+        "leg (the declared subset proceeds, never an early INCOMPLETE)",
+        recs2.kinds() == @["rest_resp", "gap"] and
+        recs2[1].raw.get("what").strVal == "rest_truncated" and
+        dirs2.dirKinds() == @["rest_req"] and
+        dirs2[0].direction == dirDown and dirs2[0].page == 1 and
+        c2.phase == phInitialRest and not c2.incomplete)
+  for page in 1 .. 10:
+    (recs2, dirs2) = c2.step(evRest("down", page, 200, "Y", "k" & $page,
+                                     restBody(@["0006" & align($page, 2, '0')])))
+  check("a truncated INITIAL down chain records the gap, derives the " &
+        "declared subset and issues the candidate REG",
+        recs2.kinds() == @["rest_resp", "gap", "sub"] and
+        recs2[1].raw.get("what").strVal == "rest_truncated" and
+        dirs2.dirKinds() == @["reg"] and c2.awaiting == awCandReg and
+        c2.candidatesKnown and not c2.incomplete)
 
 # ---------------------------------------------------- parse-failure counting
 
