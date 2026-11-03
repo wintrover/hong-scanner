@@ -51,8 +51,12 @@ or no connection. No real market data enters the app or the repository
 
 ## Running against the local API
 
-The API binds **127.0.0.1 only** — remote exposure is out of scope by
-contract (`tools/api/README.md` §7). Start it, then point the app at it:
+The API's default bind is **127.0.0.1**; `--bind <IPv4 unicast>` is the
+only way to change it — private/link-local addresses included
+(`tools/api/README.md` §1). `0.0.0.0` is container-only (behind the
+platform ingress), and direct internet exposure of any non-loopback
+address is a contract violation (§1/§5). Start it, then point the app
+at it:
 
 ```sh
 python3.13 tools/api/serve.py --runs /abs/runs --ledger /abs/ledger.hcj.jsonl --port 8080
@@ -63,6 +67,19 @@ flutter run --dart-define=HS_API_BASE=http://10.0.2.2:8080   # Android emulator
   This is the `HS_API_BASE` default.
 - Physical device over USB: `adb reverse tcp:8080 tcp:8080`, then
   `--dart-define=HS_API_BASE=http://127.0.0.1:8080`.
+- Physical device over Wi-Fi (measured 2026-11-03, SM-G977N / Android
+  12): bind the API to the PC's LAN address (`--bind 192.168.0.7`,
+  port 8080), then build with
+  `--dart-define=HS_API_BASE=http://192.168.0.7:8080`. dart:io
+  HttpClient does not go through Android's Java-layer cleartext
+  policy, so plain `http://` to a LAN IP literal worked with **no**
+  `network_security_config` / `usesCleartextTraffic` change — every
+  endpoint returned 200 from the physical device. This path is
+  **plaintext and unauthenticated** (the API has no auth, §5): it is
+  an accepted risk for a trusted home Wi-Fi only, and any device on
+  the same LAN can read the records. The PC's address is DHCP-leased:
+  reserve it at the router or rebuild the APK when it changes —
+  `HS_API_BASE` is compile-time only (no runtime setting).
 - `https://` origins work as-is: dart:io HttpClient performs standard
   certificate validation (no `badCertificateCallback` override — the
   default trust evaluation stays untouched). Plain `http://` local
@@ -70,7 +87,7 @@ flutter run --dart-define=HS_API_BASE=http://10.0.2.2:8080   # Android emulator
 
 ## Basic Auth & HTTPS (Northflank front)
 
-The API server still binds loopback only (`tools/api/README.md` §7);
+The API server itself has no authentication (`tools/api/README.md` §5);
 remote reachability comes from a deployment front (Northflank HTTPS with
 Basic Auth), which the app supports as follows:
 
@@ -270,6 +287,14 @@ APK artifacts are gitignored (`/build/`) and never committed.
   required `ci` check plus the `ALL CONTRACT SUITES PASSED` gate marker
   (AGENTS.md §2.1). The main agent reads the mobile run's marker from the
   run log before merging; a missing run is UNKNOWN, not SUCCESS.
+- Local APK builds need the gitignored `google-services.json` next to
+  `mobile/android/app/` (the google-services Gradle plugin **is** applied
+  and fails the build without it — `processDebugGoogleServices`). CI
+  restores it from the `GOOGLE_SERVICES_JSON` secret; a bare worktree or
+  an ASCII-path scratch copy does not carry untracked files, so copy the
+  real one in before building (measured 2026-11-03: first build exit 1
+  "File google-services.json is missing", rebuild after copying it from
+  the main checkout: exit 0).
 
 ## Local toolchain used for this scaffold
 
