@@ -377,6 +377,7 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
  "repoll_seconds":300,"page_cap":10,"drain_seconds":10,
  "ack_timeout_seconds":10,"watchdog":"15:40:00+09:00",
  "subscription_caps":{"per_direction":100,"total":200},
+ "selection_policy":"kiwoom_response_order_first_100_v1",
  "collector":{"schema":"hong-scanner-collector-config/1",
    "api_id":"ka10027","rest_domain":"https://mockapi.kiwoom.com",
    "ws_endpoint":"wss://mockapi.kiwoom.com:10000/api/dostk/websocket","profile":"<alias>"},
@@ -389,19 +390,39 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
 단말 cont_yn으로 감사된다. 선언이 없으면 기존 규칙(체인 재시작 REJECT)이
 그대로 적용된다.
 
+`selection_policy`는 구독 선출 정책의 고정 기록이다(2026-11-03 사용자
+승인): 방향별 확정 후보를 키움 응답 순서(페이지 순→행 순) 그대로
+소비해 처음 100개를 구독한다. 재정렬·재채점 없음 — 수치 필드를
+파싱해 다시 순서를 매기지 않는다. 잘린 후보는 "후보 없음"이 아니라
+기록된 관측 제외다: 제외가 발생한 방향마다 `subscription_truncated`
+갭(symbol null, detail에 direction·candidate_count(확보 수 기준 — 
+미확인 페이지의 추정 없음)·selected_count·excluded_count·
+remaining_unverified_pages·정책 id)을 남기고, 사실은
+SUBSCRIPTION_TRUNCATED 이벤트(subscription-truncated-v1, HIGH/
+INCOMPLETE, DATA_GAP_SUSPECTED 병행)가 담당한다. 후보 이벤트는 선출과
+무관하게 기록된 REST 전체에서 발화한다. 양방향 선출 집합에 동시에 든
+종목은 여전히 거부다(fail-closed — 자동 dedup 없음), composeRegData의
+상한 검사는 그대로 방어 검사로 남는다.
+
 ### 6.2 개시 순서 (판정 권위 core)
 
 config·calendar → `connect` → (conn open) → 0s REG req(별도,
 composeMarketStateReg, refresh="1") → ack → 초기 REST 조회(up 체인 →
 down 체인, cont-yn/core가 page_cap 내 반복) → 후보 도출(vendor_input,
-KRX) → 0B REG req(refresh="1") → ack → 스트리밍. 상한 도달 시
-`gap`(rest_truncated)을 기록하고 조회된 페이지로 도출·REG를 진행한다
+KRX) → 구독 선출(sub_input.selectTopPerDirection, 정책
+kiwoom_response_order_first_100_v1 — 응답 순서 상위 방향당 100,
+재정렬 없음; 제외 발생 방향마다 subscription_truncated 갭) → 0B REG
+req(refresh="1") → ack → 스트리밍. 상한 도달 시
+`gap`(rest_truncated)을 기록하고 조회된 페이지로 도출·선출·REG를
+진행한다
 (선언된 truncated 부분집합 — REPLAY_CONTRACT §12.1: 초과분은 "미조회",
 세션을 죽이지 않는다. 사실은 REST_TRUNCATED 이벤트가 담당). 이후
 `timer poll`마다
-재조회 → 후보 변화 시 스왑: REMOVE(구세대 전체)→ack(return_code 0)→
+재조회 → 도출·선출 → 후보 변화 시 스왑: REMOVE(구세대 전체)→ack(return_code 0)→
 REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 않는다
-(별도 REG, 구조적 배제 — sub_input.nim).
+(별도 REG, 구조적 배제 — sub_input.nim). 모든 REG 경로(초기·market-ack
+재시작·스왑·폴 재시작)는 선출된 집합으로 구성된다 — 원본 전체 후보가
+composeRegData에 도달하는 경로는 없다.
 
 ## 7. GAP 분류 (계약 §12 확정표의 구현 매핑 — 전부 기존 kind)
 
@@ -411,6 +432,7 @@ REG(신세대, refresh="1")→ack. 0s는 스왑 경로에 절대 등장하지 �
 | 전송 오류(error what=send/rest) | `gap`(symbol null + detail) | 재조회는 다음 poll에서 |
 | 인증 실패(REST 401·auth 코드) | `gap` + (refresh_token 후) 1회 재시도 | 재시도 성공분만 rest_resp 체인으로 기록(체인 연속성 보존), 실패 체인은 그날 증거로 남는다 |
 | REG ACK 실패(return_code≠0) | `sub`(ack, return_code≠0) — 구독 미확정 | activeSets 불변(fail-closed) → 해당 종목 틱은 소비 검사 1에 걸려 격리. 시작 0s/0B REG 실패·타임아웃은 INCOMPLETE 경로(§8) |
+| 구독 선출 제외(방향 후보 > 100) | `gap`(symbol null, what=subscription_truncated, detail: direction·candidate_count(확보 수)·selected_count·excluded_count·remaining_unverified_pages·정책 id) | 선출 상위만 REG; 제외 사실은 SUBSCRIPTION_TRUNCATED 이벤트(DATA_GAP_SUSPECTED 병행). 페이지 상한(rest_truncated)과 별개 사실 — 한 방향에서 병존 가능. 양방향 선출 집합의 교차 중복은 이 갭이 아니라 SubInputError 거부(fail-closed) |
 | 기록 실패(recorder poisoned) | (기록 불가 — 파일 보존) | finish() 금지, abandon(), exit 4 |
 | 큐 overflow | 발생하지 않는다(구조): bounded 큐 + blocking put = 조용한 버림 없음, 역압은 TCP 읽기 정지. 파이프 단절은 sidecar exit 4 | — |
 | 전체 스트림 장시간 무응답(STALE) | 연속한 `timer poll` 두 개 사이에 `ws_raw`가 하나도 없으면 `gap`(symbol null, what=stale — GAP_SUSPECTED) | 스트리밍 계속(늦은 트래픽이 gap 해소), 회복 없이 watchdog이면 INCOMPLETE |

@@ -257,6 +257,11 @@ sidecar + collector core)가 계약 스위트와 함께 구현·merge됐다. 단
   페이지 수는 선언된 상한 이내로 제한한다. 상한에 도달했을 때 추가
   페이지가 남아 있으면 `truncated`로 기록하고, 초과분은 "후보 없음"이
   아니라 "미조회"다. 상한은 스캐너 측 선언이며, 그 값도 승인 항목이다.
+  구독 대상은 확정 후보 각 방향의 응답 순서 상위 100개다(정책
+  `kiwoom_response_order_first_100_v1`, 2026-11-03 사용자 승인).
+  제외 후보는 "후보 없음"이 아니라 기록된 관측 제외이며, 그 사실은
+  subscription_truncated 갭과 SUBSCRIPTION_TRUNCATED 이벤트가
+  담당한다. 양방향 선출 집합의 교차 중복은 여전히 거부다(fail-closed).
 
 ## PH-1 / PH-2
 

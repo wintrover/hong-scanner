@@ -35,7 +35,7 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | P5 | exit codes 0/2/3/4/5/6/7 | separate codes per command |
 | P6 | no `--allow-dirty`; debugging builds stay non-canonical | escape hatch (rejected) |
 | P7 | public repo + synthetic CI; calendars gitignored | private repo (not needed for CI minutes) |
-| P8 | candidates are queried via `ka10027` with `stex_tp="1"` and one query per direction (`sort_tp="1"`/`"3"`); query scope and page upper limit are declared and recorded (VS-2 target, no producer yet) | any other universe or uncapped pagination (unapproved) |
+| P8 | candidates are queried via `ka10027` with `stex_tp="1"` and one query per direction (`sort_tp="1"`/`"3"`); query scope and page upper limit are declared and recorded (VS-2 target, no producer yet); the subscription set is each direction's first 100 confirmed candidates in vendor response order — never re-ranked (policy `kiwoom_response_order_first_100_v1`, user-approved 2026-11-03; exclusions recorded as `subscription_truncated`/SUBSCRIPTION_TRUNCATED, cross-direction duplicates rejected) | any other universe, uncapped pagination, or re-scoring the vendor's order (unapproved) |
 | P9 | approval is a separate decision with its own conditions (GATES); `session_end` and `VERDICT MATCH` never imply approval | treat MATCH as approval (rejected) |
 | P10 | `NO_TRIGGER_OBSERVED` is only for complete, valid runs, and only describes the observed stream | read zero signals as market-level absence (rejected: tick completeness is not guaranteed) |
 | P11 | the config record may declare `environment` (`demo` or `prod`); verify enforces the commit-marker gate only for a declared environment, and synthetic streams report the marker state without enforcing it | enforcing the marker gate on synthetic streams (rejected: CI has no recorder) |
@@ -76,7 +76,7 @@ changeable assumption; treating one as a requirement is what stalled v1–v5.
 | U6 | real signal frequency and false-positive rate | PH-1/PH-2 |
 | U7 | durability under power loss | VS-2 drill |
 | U8 | whether the live feed drops ticks silently (0B delivery completeness) — no provider sequence or completeness contract exists (full-text search of all 337 API specs: zero hits), so client logs alone cannot prove absence | G2: WS-derived volume vs REST `acc_trde_qty` |
-| U9 | an adequate ka10027 page upper limit (candidates missed by the cap) | PH-1 / G2 |
+| U9 | an adequate ka10027 page upper limit (candidates missed by the cap); with the top-100 selection the subscription needs only the first 100 per direction in response order, so the cap now bounds observation completeness — not subscription validity — but whether the vendor's response order is the operationally right ranking stays unmeasured | PH-1 / G2 |
 | U10 | refresh=0's termination scope, grp_no scope semantics, REMOVE partial-removal behavior, multi-type REG acceptance (official wording absent for all four) | G2 mock subscription experiments |
 | U11 | Kiwoom PING period and no-response policy | G2 (ws_raw PING records) |
 | U12 | the full FID 215 value table beyond the evidenced close subset {2, 4, 8, 9} | G2 observation |
