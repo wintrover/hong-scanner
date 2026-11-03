@@ -155,6 +155,25 @@ still requires G2 credentials.
   API ID=ka10027]"` + return_code 5, 요청 간격 1초로 두면 통과(창 해석은
   무문서 — 1초 간격이 문서화된 상한의 준수). The 모의투자 운영규정 text itself is UNVERIFIED (SPA, not
   statically retrievable).
+- Kiwoom REST token–IP binding (2026-11-03, official error-code table):
+  error 8010 — "Token을 발급받은 IP와 서비스를 요청한 IP가 동일하지
+  않습니다" (`GET openapi.kiwoom.com/errorcode/getErrorCodeListAjax`,
+  public, no login; the official SDK `kiwoom/core/errors.py` places 8010
+  in `DEVICE_AUTH_CODES`). It is the only IP-dedicated code of the
+  official 37-code table (full enumeration), and token issuance (au10001
+  `POST /oauth2/token`) takes appkey/secretkey only — no IP parameter,
+  zero IP mentions across the 356 public API spec groups. A token is
+  bound to the IP that requested it; reuse from another source IP fails
+  closed — the official basis for requiring a stable egress IP on any
+  cloud REST path (NF-1). It does NOT establish: overseas-IP acceptance
+  (UNKNOWN, U13), 8010's applicability to WS sessions (no official
+  statement), or the circulating "허용 IP 필수·최대 10개" wording
+  (origin: third-party autoStock docs, not Kiwoom — UNVERIFIED; the
+  portal 개발정보 screen is login-walled and stays a user-side
+  verification step). Single-shot observation: a KR residential IP
+  reaches credential validation on the mock token endpoint (8001 on
+  dummy keys) — no KR-side IP block; no evidence either way for
+  datacenter/overseas IPs.
 - Durability evidence (man-pages, POSIX.1-2024, SQLite, LevelDB,
   PostgreSQL): fsync(2) flushes file data and metadata, but "Calling
   fsync() does not necessarily ensure that the entry in the directory
