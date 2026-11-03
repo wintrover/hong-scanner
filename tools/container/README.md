@@ -323,8 +323,9 @@ main push 하나가 **세 개의 SLSA 증명 대상**을 만든다. 모두 동�
 
 - **스테이징**(§2 계약 그대로, attest.yml의 이미지 페이즈): mktemp 컨텍스트 =
   CI_BUILD_OUT 두 바이너리(**sha256 바이트 일치 단언**) + git 추적 파일
-  (Dockerfile·.dockerignore·serve.py·INDEX·sidecar·requirements·notify
-  4모듈). 스테이징 calendars 디렉터리에 `*.json`이 나타나면 거부(단언).
+  (Dockerfile·.dockerignore·serve.py·cloud_supervisor.py·INDEX·sidecar·
+  requirements·notify 4모듈). 스테이징 calendars 디렉터리에 `*.json`이
+  나타나면 거부(단언).
 - **표식 없음**: 운영 이미지는 `org.hongscanner.image-purpose` 라벨을
   갖지 않는다(§3 — 라벨이 있으면 배치 금지 대상). BuildKit 내장
   provenance/sbom 매니페스트도 생성하지 않는다 — 이미지의 SLSA 증명은
