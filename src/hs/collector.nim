@@ -16,6 +16,13 @@
 ##   - candidate derivation from the preserved REST bytes via
 ##     vendor_input.upDownCandidates (KRX, one query per direction,
 ##     declared page cap; any chain failure is fail-closed);
+##   - the deterministic subscription selection between derivation and
+##     REG composition (sub_input.selectTopPerDirection, policy
+##     selectionPolicyId): each direction's first 100 candidates in
+##     vendor response order, never re-ranked — every REG path
+##     (initial, market-ack restart, swap, poll restart) is composed
+##     from the selected sets, and any exclusion is a recorded
+##     subscription_truncated gap, never a silent drop;
 ##   - the generation swap REMOVE(old) -> ack -> REG(new) -> ack;
 ##   - the 0B/0s channel discrimination and tick parsing via tickwire
 ##     (single parser, shared with replay);
@@ -224,6 +231,7 @@ proc preambleRecords*(cfg: CollectorConfig): seq[RecOut] =
       ("recovery_bp", hInt(cfg.params.recoveryBp)),
       ("warmup_bars", hInt(cfg.params.warmupBars)))),
     ("repoll_seconds", hInt(cfg.repollSeconds)),
+    ("selection_policy", hStr(selectionPolicyId)),
     ("session_date", hStr(cfg.sessionDate)),
     ("subscription_caps", hObj(
       ("per_direction", hInt(maxPerDirection)),
@@ -437,6 +445,39 @@ proc derive(c: var Collector; upPages, downPages: seq[RawHttpResp];
   upDownCandidates(upChain, downChain, c.cfg.pageCap,
                    upTruncated, downTruncated)
 
+proc selectCandidates(records: var seq[RecOut]; cand: UpDownCandidates;
+                      upTruncated, downTruncated: bool; t: string):
+                     UpDownCandidates =
+  ## The one selection point (sub_input.selectTopPerDirection, policy
+  ## selectionPolicyId), applied to the derived candidates before
+  ## anything stores or composes them: candPending and every REG —
+  ## initial, market-ack restart, swap REG, poll restart — carry the
+  ## selected sets, so the raw derived universe can never reach
+  ## composeRegData on any path. Each direction that excluded any
+  ## candidate records the exclusion here as a subscription_truncated
+  ## gap (symbol null). The detail carries the direction, the CONFIRMED
+  ## counts (what the recorded pages affirm — never an estimate of
+  ## unfetched pages), whether unverified pages may remain on that leg,
+  ## and the policy id. Distinct from rest_truncated: a leg can close
+  ## at the page cap and above the selection cap at once, or only above
+  ## the selection cap.
+  let sel = selectTopPerDirection(cand)
+  for i in 0 ..< sel.facts.len:
+    let f = sel.facts[i]
+    if f.excludedCount <= 0:
+      continue
+    records.add(gapRecord("", "subscription_truncated",
+      "selection policy " & selectionPolicyId & ": direction=" &
+      f.direction & " candidate_count=" & $f.candidateCount &
+      " selected_count=" & $f.selectedCount &
+      " excluded_count=" & $f.excludedCount &
+      " remaining_unverified_pages=" &
+      (if (i == 0 and upTruncated) or (i == 1 and downTruncated): "true"
+       else: "false") &
+      " — the excluded codes are excluded from this session's " &
+      "subscription, not absent from the market", t))
+  sel.selected
+
 proc restRespRecord(c: Collector; direction: Direction; page: int;
                     resp: RawHttpResp): RecOut =
   ## One rest_resp record (rest_resp.nim schema): declared scope + page +
@@ -640,6 +681,8 @@ proc chainAdvance(c: var Collector; records: var seq[RecOut];
         " — the session's candidate derivation never completed")
     c.phase = phStreaming
     return
+  cand = selectCandidates(records, cand, finished.firstTruncated,
+                          truncated, t)
   if finished.purpose == cpInitial:
     c.candPending = cand
     c.candidatesKnown = true

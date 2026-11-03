@@ -37,6 +37,14 @@
 ##                                                        what
 ##                                                        "rest_truncated"
 ##                                                        (HIGH, INCOMPLETE)
+##   subscription-truncated-    1  SUBSCRIPTION_          gap record with
+##   v1                            TRUNCATED              what "subscription_
+##                                                        truncated" (HIGH,
+##                                                        INCOMPLETE; the
+##                                                        gap detail's
+##                                                        direction token
+##                                                        becomes the fact's
+##                                                        direction)
 ##   market-state-unknown-v1    1  MARKET_STATE_UNKNOWN   0s ws_raw payload
 ##                                                        with an FID 215
 ##                                                        value outside the
@@ -113,6 +121,7 @@ const
   ruleFeedDisconnected* = "feed-disconnected-v1"
   ruleGapSuspected* = "gap-suspected-v1"
   ruleRestTruncated* = "rest-truncated-v1"
+  ruleSubscriptionTruncated* = "subscription-truncated-v1"
   ruleMarketStateUnknown* = "market-state-unknown-v1"
   ruleSessionClose* = "session-close-v1"
   ruleSessionIncomplete* = "session-incomplete-v1"
@@ -257,8 +266,12 @@ proc consumeConfig(s: var EventGenState; r: Record) =
 proc gapEvents(s: var EventGenState; r: Record; events: var seq[EventFact]) =
   ## Every gap record is DATA_GAP_SUSPECTED (§3: a gap is a period whose
   ## data cannot be trusted — authority, unlike ws_conn). A gap whose
-  ## `what` names a REST truncation is additionally REST_TRUNCATED: two
-  ## facts of one record, distinguished by event_type (and so by id).
+  ## `what` names a REST truncation is additionally REST_TRUNCATED, and
+  ## one whose `what` names a subscription truncation is additionally
+  ## SUBSCRIPTION_TRUNCATED: two facts of one record, distinguished by
+  ## event_type (and so by id). The subscription fact's direction is the
+  ## pinned `direction=up|down` token of the gap detail — an optional
+  ## schema field, left absent when the token is absent, never guessed.
   let raw = r.raw
   var sym = ""
   var what = ""
@@ -279,6 +292,16 @@ proc gapEvents(s: var EventGenState; r: Record; events: var seq[EventFact]) =
   if what == "rest_truncated":
     events.add(judged(s, r.seq, "REST_TRUNCATED", ruleRestTruncated, sym,
                       at, "HIGH", "INCOMPLETE", contentHash(r)))
+  if what == "subscription_truncated":
+    var dirName = ""
+    let dtn = raw.getOpt("detail")
+    if dtn.isSome and dtn.get.kind == hkStr:
+      for tok in dtn.get.strVal.split(' '):
+        if tok == "direction=up": dirName = "UP"
+        elif tok == "direction=down": dirName = "DOWN"
+    events.add(judged(s, r.seq, "SUBSCRIPTION_TRUNCATED",
+                      ruleSubscriptionTruncated, sym, at, "HIGH",
+                      "INCOMPLETE", contentHash(r), direction = dirName))
 
 proc connEvents(s: var EventGenState; r: Record; events: var seq[EventFact]) =
   ## ws_conn closed_ok / closed_error is FEED_DISCONNECTED. `open`

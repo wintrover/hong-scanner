@@ -262,6 +262,25 @@ auditable:
   declared (below-cap `cont-yn=Y` stays a REJECT), and the event layer
   never judges a partial universe into candidate events — the
   `REST_TRUNCATED` fact (rest-truncated-v1) carries the truncation.
+- Subscription selection is deterministic (user-approved policy
+  `kiwoom_response_order_first_100_v1`): each direction's confirmed
+  candidates are consumed in vendor response order — page then row,
+  exactly the recorded order, never re-ranked and never re-scored from
+  a parsed field — and the first 100 per direction (notice #49) become
+  the subscription set. A candidate beyond the kept prefix is excluded
+  from the session's subscription; that exclusion is recorded and
+  judged (the collector's `subscription_truncated` gap — symbol null,
+  detail carrying the direction, the confirmed counts (never an
+  estimate of unfetched pages), whether unverified pages may remain on
+  the leg, and the policy id — judged `SUBSCRIPTION_TRUNCATED`,
+  subscription-truncated-v1, HIGH/INCOMPLETE; the
+  `DATA_GAP_SUSPECTED` fact of the same record stays): an exclusion is
+  never "no candidate", and the candidate events keep judging the FULL
+  recorded universe. The policy id is recorded in the config record
+  (`selection_policy`). Cross-direction duplicates (a code in both
+  kept sets) are still a rejection (fail-closed; no auto-dedup), and
+  the composition caps (`checkDirectionCaps`) stay as unchanged
+  defense.
 - Each attempt is recorded as a `rest_resp` record that carries the
   declared request scope and the page index, so replay can audit what was
   asked for and what came back.
@@ -349,8 +368,10 @@ Scanner composition policy (`composeRegData`, `composeMarketStateReg`,
 `composeRemoveData`, `activeSets` in the same module):
 
 - The candidate REG is single-type: item = up then down codes (vendor
-  order), type `["0B"]`, caps ≤100 per direction and ≤200 total
-  (notice #49). The market-state REG is its own request: item = [],
+  order — the selected first-100-per-direction sets, §12.1 policy
+  `kiwoom_response_order_first_100_v1`), type `["0B"]`, caps ≤100 per
+  direction and ≤200 total (notice #49). The market-state REG is its
+  own request: item = [],
   type `["0s"]` (the official 0s example's channel-only form). A REG
   mixing `0s` into a candidate replacement cannot be composed — the
   composition makes the invariant "0s never appears in a 0B replacement
@@ -539,6 +560,7 @@ record's canonical line):
 | `feed-disconnected-v1` | FEED_DISCONNECTED | ws_conn `closed_ok` (INFO) / `closed_error` (HIGH); `open` judges nothing | INFO or HIGH / INCOMPLETE |
 | `gap-suspected-v1` | DATA_GAP_SUSPECTED | every gap record | HIGH / INCOMPLETE |
 | `rest-truncated-v1` | REST_TRUNCATED | a gap record whose `what` is `rest_truncated` (second fact of the same record, distinct by event_type) | HIGH / INCOMPLETE |
+| `subscription-truncated-v1` | SUBSCRIPTION_TRUNCATED | a gap record whose `what` is `subscription_truncated` (second fact of the same record, distinct by event_type); the fact's direction is the gap detail's pinned `direction=up\|down` token | HIGH / INCOMPLETE |
 | `market-state-unknown-v1` | MARKET_STATE_UNKNOWN | a 0s ws_raw payload whose FID 215 value is outside the evidenced set {2,4,8,9}; at most one per record | HIGH / UNKNOWN |
 | `session-close-v1` | SESSION_ENDED | the session_end seal record | INFO / OBSERVING |
 | `session-incomplete-v1` | SESSION_INCOMPLETE | `finish` on a consumed stream that never sealed; binds to the last consumed record | HIGH / INCOMPLETE |

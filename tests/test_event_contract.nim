@@ -35,7 +35,8 @@ const
   eventTypes = @["CANDIDATE_ENTERED", "CANDIDATE_UPDATED",
                  "CANDIDATE_EXITED", "FEED_DISCONNECTED",
                  "DATA_GAP_SUSPECTED", "REST_TRUNCATED",
-                 "MARKET_STATE_UNKNOWN", "REPLAY_MATCH", "REPLAY_MISMATCH",
+                 "SUBSCRIPTION_TRUNCATED", "MARKET_STATE_UNKNOWN",
+                 "REPLAY_MATCH", "REPLAY_MISMATCH",
                  "SESSION_ENDED", "SESSION_INCOMPLETE", "SESSION_APPROVED"]
   dataQualities = @["OBSERVING", "INCOMPLETE", "UNKNOWN"]
   severities = @["INFO", "HIGH", "CRITICAL"]
@@ -293,8 +294,8 @@ block schemaFiles:
           .get("description").asStr)
 
 block enumCompleteness:
-  check("enum: the contract vocabulary is exactly 12 event types",
-        eventTypes.len == 12)
+  check("enum: the contract vocabulary is exactly 13 event types",
+        eventTypes.len == 13)
   check("enum: event_type is the full contract vocabulary",
         enumOf(eventSchema, "event_type") == eventTypes)
   check("enum: data_quality is OBSERVING|INCOMPLETE|UNKNOWN",

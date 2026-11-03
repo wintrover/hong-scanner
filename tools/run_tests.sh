@@ -36,6 +36,7 @@ run nim c -r --hints:off --warnings:off --path:src tests/test_event_gen_contract
 run nim c -r --hints:off --warnings:off --path:src tests/test_subcheck_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_contract.nim
 run nim c -r --hints:off --warnings:off --path:src tests/test_collector_stream_contract.nim
+run nim c -r --hints:off --warnings:off --path:src tests/test_subscription_selection_contract.nim
 run bash tests/test_collector_pipe_contract.sh
 run bash tools/collector/test_sidecar.sh
 run bash tools/notify/test_notify.sh
