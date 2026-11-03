@@ -17,10 +17,13 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 - VS-1: HCJ, seq gauge, `session_date`, `gap`, 290 4분류, 3분봉 경계,
   경계 차분, `bar_position`, 리플레이(`bars`+`signals`), 반증 4분류,
   provenance 5종 대조, CI(합성 전용), GitHub merge gate, canonical main 빌드.
+- Phase-0 컨테이너 계약: 단일 컨테이너 이미지·cloud supervisor·attest
+  공급망(2바이너리·이미지 digest 증명) — tools/container/README.md.
 
 ## Explicitly Out of Scope
 
-- Northflank(계정 준비 전), 고정 egress IP, 실주문/공매도.
+- Northflank 배포·운영(계정 준비 전 — NF-0 미통과; Phase-0 코드·계약·
+  공급망은 병합돼 아래 증거 로그에 기록), 고정 egress IP, 실주문/공매도.
 - 실시장 데이터의 저장소 반입.
 - REST 봉 타임스탬프 규약 확정(ka10080) — G4.
 - 전략 타당성 평가 — PH-2.
@@ -43,7 +46,30 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED — 상주 알림 워커·세션 런처는 PR #29(`d787b37`) 구현; systemd 서비스·운영 전환만 미구축 |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) — PH-1 (2) 관측 시도는 2026-11-02 INCOMPLETE로 종료(증거 로그) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 누적 11회 설치 성공·2회 attest 게이트 실패(`f4ad05c` 10-30·`97043fd` 11-02 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 누적 11회 설치 성공·3회 attest 게이트 실패(`f4ad05c` 10-30·`97043fd` 11-02·`7eefd0d` 11-02 이미지 페이즈 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
+
+### Northflank gates (NF)
+
+Phase-0(코드·계약·공급망)은 병합됐지만 **Northflank 계정·배포·Kiwoom 클라우드
+접속은 아직 없다**. NF 사다리는 그 경계를 게이트로 고정한다: 각 단계는 통과
+조건을 문언으로 가지며, 증거 없이 DONE이 되지 않는다(fail-closed).
+P12(승인)의 조건은 이 사다리와 무관하게 그대로 유지된다.
+
+| # | gate | 통과 조건 | status |
+|---|---|---|---|
+| NF-0 | 계정·비용·리전 | 사용자가 Northflank 계정·비용 상한·리전을 결정하고 기록한다(사용자 게이트 — 저장소가 대행하지 않는다) | PENDING(사용자 게이트) |
+| NF-1 | 전용 egress + Kiwoom 허용 IP | 전용 egress IP가 발급되고 키움 측 수용이 실측된다(U5·U13) | PENDING |
+| NF-2 | 클라우드 OAuth 발급·비누출 | 클라우드 런타임에서 토큰이 `token_source=env`로 발급되고 토큰 값이 이미지·HCJ·로그 어디에도 기록되지 않음이 검증된다(M13) | PENDING |
+| NF-3 | Kiwoom REST·WS 실측 | 클라우드 egress에서 REST·WS 세션이 실측된다(로컬 관측과 동등한 계약 준수) | PENDING |
+| NF-4 | 볼륨 영속성 | 컨테이너 재시작·재배치 후 `runs/`·`notify/`·`calendars/*.json`이 보존되고 INDEX 교차검증이 통과한다(REPLAY_CONTRACT §14.4) | PENDING |
+| NF-5 | 단일 작성자·프로브 운영 | 프로브 3종이 플랫폼에 매핑돼(tools/container/README.md §7.2) 관측되고 run 디렉터리의 작성자가 recorder뿐임이 실측된다 | PENDING |
+| NF-6 | API 보안 | HTTPS·Basic Auth 뒤에서만 접근 가능하고 GET-only 계약이 유지됨이 실측된다 | PENDING |
+| NF-7 | supervisor 런타임 운영 | 실세션(시도·COMMITTED·INCOMPLETE·보존)이 REPLAY_CONTRACT §14.3대로 관측된다 — SIGKILL escalation·시도 상한 소진 포함 | PENDING |
+| NF-8 | FCM 실기기 | 클라우드 배포에서 실기기까지 FCM 종단이 실측된다(U17) | PENDING |
+| NF-9 | 이미지 공급망 | `main-<sha7>` 이미지가 push·digest 증명되고 운영자 PAT 경로 검증(tools/container/README.md §8.3)까지 통과한다 | **부분 증거** — `782f5da` 이미지 공급망 end-to-end 성공(증거 로그); `7eefd0d`는 이미지 페이즈 실패, PAT 경로 미실측 |
+| NF-10 | Replay 동등성 | 클라우드에서 생산된 런 디렉터리가 canonical 바이너리 replay·verify와 바이트 동등함이 실측된다 | PENDING |
+| NF-11 | 복구·백업 | 볼륨 백업·복원 절차가 드릴되고 복원 후 검증이 통과한다 | PENDING |
+| NF-12 | 실운영 승인 | NF-0~NF-11 위에서 P12의 6조건이 클라우드 운영에 대해 충족·문서화된다 | PENDING(NF 사다리 완료 전 성립 없음) |
 
 ### Evidence log (2026-10-29)
 
@@ -148,6 +174,25 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | 정리 | notify-watch 워크트리 드릴 증거 5건(drill-fcm 2·drill-watch 3) main runs/로 복사 보존. **agent-37 사고**: 서브에이전트가 첫 게이트를 워크트리가 아닌 메인 트리에서 실행(build/hongscanner 재빌드 — gitignored, 보존) — PH-1 (2) 수거체 무영향 확인(collector mtime 08:30 무손상·입력 파일 무결), 잔류물 `runs/drill-fcm-20261102-130012` 보존. wsfix·notify-watch·gates 워크트리는 본 문서 PR merge 후 정리(브랜치 로컬+원격 삭제) |
 
 한계(2026-11-02 오전~저녁): 라이브 관측이 시작됐지만 봉인(`session_end`) 세션은 아직 없다 — P9는 BLOCKED 유지. 세션 -c/-d/-e는 pre-merge 프로브와 merge 직후 혼재이며 canonical 전일 세션은 11-03(화) 실측 대기. FCM 실기기 표시는 dumpsys·사용자 확인으로 관측했으나 도착 시각·순서·중복의 SLA는 여전히 무보장(UNKNOWN 그대로). REST_TRUNCATED는 poll마다 발화할 수 있어(벤더가 양방향 상한 초과) 전일 세션에서 HIGH 푸시 빈도가 오를 수 있음 — min_severity 정책(현재 세션용 HIGH)은 사용자 결정 항목. 푸시 지연 분포(이벤트 기록→FCM POST)·strace fsync 순서·라이브 세션의 replay 일치는 11-03 실측 예정. 수동 래퍼 pipe-exit 버그·StartLimit 후 failed 잔류 등 운영 잔여는 최종 보고에 명시.
+
+### Evidence log (2026-11-02, 낮~저녁) — Northflank Phase-0 코드·계약·공급망 merge(PR #35~#41)·문서 통합
+
+| gate | observed |
+|---|---|
+| Phase-0(merge) | 7건 merge — #35 serve.py `--bind`(기본 127.0.0.1 불변·0.0.0.0은 컨테이너 전용)·#36 sidecar env TokenProvider(kiwoomcli 기본 경로 불변)·#37 모바일 Basic Auth+보안 저장소·#38 컨테이너 계약+Docker 레이어(스테이징 빌드 컨텍스트·캘린더 INDEX 분리)·#39 serve.py 빈 ledger 0레코드 투영(notify 워커 O_CREAT 크래시 수정)·#40 공급망(2바이너리 증명·GHCR 이미지·digest 증명)·#41 cloud supervisor(프로브 3종 분리·세션 멱등성·ENTRYPOINT 전환). main 경로 `57c299e`→`e355342`(#35)→`653cee4`(#36)→`3abc1a3`(#37)→`a9ee293`(#38)→`7fa156d`(#39)→`782f5da`(#40)→`7eefd0d`(#41) |
+| NF-9(782f5da) | main `782f5da`(PR #40 merge) push attest 런 [41456644748](https://github.com/wintrover/hongscanner/actions/runs/41456644748)(2026-11-02T13:51Z) conclusion success — 이미지 `ghcr.io/wintrover/hongscanner:main-782f5da` = digest `sha256:5f1a0ea87db1c8379851c6987875a8e8b46fb7a4d719c355842da47e6b9effec`; 이미지 증명 subject `ghcr.io/wintrover/hongscanner`(subject-digest 일치). 저장소 attestations API로 워크플로 밖 재확인: payload의 source digest `782f5da1dc17749c6886131681a86c954e7b20d6`·ref `refs/heads/main`·workflow `.github/workflows/attest.yml`·run `41456644748`. 로컬 `gh attestation verify oci://`는 토큰에 `read:packages` 스코프가 없어 거부 — 운영자 PAT 경로만 가능(tools/container/README.md §8.3; LIMITS.md) |
+| P3(PR #41) | PR #41 head `b6b8046` ci 런 [41470981402](https://github.com/wintrover/hongscanner/actions/runs/41470981402) conclusion success — 로그 **2129행** `ALL CONTRACT SUITES PASSED`(2026-11-02T15:24:24Z), ok 1,618건·`161 passed, 0 failed` 실측(supervisor 스위트 포함 게이트) |
+| P13(7eefd0d 실패) | main `7eefd0d`(PR #41 merge) push attest 런 [41471911408](https://github.com/wintrover/hongscanner/actions/runs/41471911408)(2026-11-02T15:28:22Z) **failure** — 이미지 페이즈만 실패: 스테이징 컨텍스트에 `tools/container/cloud_supervisor.py` 부재(`COPY ... not found` — PR #41이 Dockerfile에 추가한 파일이 attest.yml의 이미지 스테이징 목록에 없음). 테스트 게이트·2바이너리 증명·아티팩트 업로드는 전부 success(README §8.1 페이즈 순서 불변식대로 로컬 재설치 경로는 보존), digest 검증·이미지 증명 업로드는 skip. **`ghcr.io/wintrover/hongscanner:main-7eefd0d`는 존재하지 않는다 — 최후 성공 이미지는 `main-782f5da`.** 수정은 attest.yml 스테이징 목록 갱신 코드 PR이며 본 문서 PR(docs-only)은 수정하지 않는다. 누적 attest 게이트 실패 3회(`f4ad05c`·`97043fd`·`7eefd0d`) |
+| NF-9 근거(볼륨) | runs/ 저장량 2026-11-02 실측: 총 6.3MB·688파일, 라이브 세션 하루 최대 1.3MB(`runs/ph1-2026-11-02-a`), 드릴 런 168~180KB → 1GiB Single Read/Write Volume 근거(PH-1 속도 기준 약 700거래일 여유). 실제 볼륨 사용량·필요 크기는 배포 전까지 UNKNOWN(U15) |
+| NF 경계 | 실제 Northflank 배포·프로브 매핑·Kiwoom 클라우드 접속은 없다 — NF-0~NF-8·NF-10~NF-12는 전부 PENDING(사용자 계정 게이트·실배포 전). 본 문서 PR은 위 증거를 네 docs 파일에 통합하는 docs-only 변경이다 |
+
+한계(2026-11-02, Phase-0): 위 증거는 코드·계약·공급망·CI·이미지 digest에 관한
+것이다. Northflank 계정·배포·프로브 매핑·Kiwoom 클라우드 실접속·볼륨
+영속성·클라우드 FCM 종단은 전부 미실시(NF 사다리 PENDING). 이미지 digest
+증명도 GitHub가 서명한 것으로 GitHub 인프라와 독립이 아니다. `7eefd0d`의
+이미지 페이즈 실패로 현재 main HEAD의 운영 이미지는 존재하지 않으며,
+PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)은 그
+수정 PR이 merge된 뒤의 다음 main에서 다시 실시한다.
 
 ## Completion Evidence
 

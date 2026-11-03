@@ -30,7 +30,7 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | previous runs require their original executable and calendar | the build gate builds the current main, while the run directory does not preserve the executable | run archive and retention design |
 | the 0.5% conflict threshold is a policy choice | small samples can trip it; it is fail-closed by design | plan §3.2 |
 | manager can still edit branch protection | GitHub cannot prevent a repo admin from changing the rules | P6 audit |
-| Northflank fixed egress IP is unverified | no account in scope; U5 stays open | deployment |
+| Northflank fixed egress IP is unverified | no account in scope; U5 stays open | NF-1 |
 | provider tick completeness is unverified | a silent feed drop and a quiet market can produce the same stream; `NO_TRIGGER_OBSERVED` speaks only about the observed stream | G2 spot-check (WS bars vs REST `acc_trde_qty`) |
 | the ka10027 page cap is scanner-side | if more pages remain when the cap is reached, they are "not fetched", not "no more candidates" | VS-2 recorder contract |
 | refresh=0's termination scope is undocumented | the official wording ("0일경우 기존등록한 item/type은 해지") does not say 전역/같은 grp_no/같은 type, so the scanner never sends refresh "0" | G2 mock subscription experiments |
@@ -46,6 +46,15 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | attestation evidence is per-merge, not standing | the attest→verify→install path is implemented and measured (GATES P13, twice); it must be re-measured after every behavior-changing main merge, and the verify line `provenance=OK` itself stays self-declared metadata — the digest chain, not that line, is what ties the installed binary to the exact main sha | P13 re-measurement |
 | CI green is bounded trust | the workflow file and repo-admin actions sit inside the trust boundary; GitHub Actions cannot attest what is installed on the host | attestation design |
 | strategy intervals and thresholds are held before approval | `warmup`/`lookback` windows and bp thresholds come from a synthetic fixture; signals before the PH-1 freeze are not acceptance evidence | PH-1 |
+| no cloud Kiwoom connection exists | every cloud-side vendor behaviour — egress-IP acceptance (U13), APAC region latency (U14), live session behaviour under the container runtime — is unmeasured; all live evidence so far came from the operator machine | NF-1/NF-3 |
+| the Northflank deployment and probe mapping are unmeasured | the probe mapping (startup→`/startup`, readiness→`/ready`, liveness→`/live`, port 8081) is a console-side manual step (tools/container/README.md §7.2) that has never been exercised on the platform | NF-5/NF-7 |
+| image attestation is still GitHub-signed | the image digest provenance, like the binary attestations, is signed inside GitHub's infrastructure — it is not independent of GitHub and does not remove the admin trust root (tools/container/README.md §8.4) | NF-9 |
+| local `gh attestation verify oci://` is refused | the local token lacks the `read:packages` scope, so the CLI verification path fails; only the operator-PAT path verifies the image attestation (tools/container/README.md §8.3) — the 2026-11-02 re-check used the repository attestations API out-of-workflow | NF-9 |
+| the image supply chain is broken at current main HEAD | the `7eefd0d` attest run failed at the image phase — the staged context lacked `tools/container/cloud_supervisor.py` (PR #41 added it to the Dockerfile but not to attest.yml's staging list) — so `main-7eefd0d` does not exist; the last good image is `main-782f5da` (GATES Phase-0 evidence log) | NF-9 fix (code PR) |
+| a single Pod is not HA | redeploys and container restarts stop the API and the probes for the restart window; the single-writer policy (P16) forbids scale-out redundancy | NF-5 |
+| no backup/restore drill exists | the volume holds the only durable copy of `runs/` and `notify/`; its loss and restore behaviour are unmeasured | NF-11 |
+| supervisor SIGKILL escalation and run-id suffix exhaustion are untested live | the supervisor suite covers the contract surface with fake children and an injected clock; SIGKILL after the grace window and the attempt-cap-exhausted path (`-a`·`-b`·`-c` all present, day uncommitted) have no live observation | NF-7 |
+| the cloud sidecar is demo-only | it refuses any base other than demo/mockapi (P19); production Kiwoom over a cloud egress is unmeasured and needs a separate confirmation | NF-3 |
 
 ## Explicit non-goals
 
