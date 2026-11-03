@@ -46,7 +46,7 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 | P10 | systemd 타이머 | `systemd-analyze calendar ...` | exit 0, next weekday 08:50 | BLOCKED — 상주 알림 워커·세션 런처는 PR #29(`d787b37`) 구현; systemd 서비스·운영 전환만 미구축 |
 | P11 | PH-1/PH-2 | frozen config, separate session | signals observed / `NO_TRIGGER_OBSERVED` | BLOCKED(G2) — PH-1 (2) 관측 시도는 2026-11-02 INCOMPLETE로 종료(증거 로그) |
 | P12 | 승인(approval) | 별도 조건 6건(하단 'Approval' 절) | 모든 조건 충족이 문서화됨 | 미구현(목표 계약, BLOCKED(G2)) |
-| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 누적 11회 설치 성공·3회 attest 게이트 실패(`f4ad05c` 10-30·`97043fd` 11-02·`7eefd0d` 11-02 이미지 페이즈 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
+| P13 | attestation·설치 digest | main 정확 sha + 설치 파일 sha256 대조 | main sha·digest 모두 일치 | 누적 19회 설치 성공(`~/.local/share/hongscanner/versions/` 19디렉터리 실측)·4회 attest 게이트 실패(`f4ad05c` 10-30·`97043fd` 11-02·`7eefd0d` 11-02·`06f4208` 11-03 이미지 페이즈 — 인과는 증거 로그; 배포 동작을 바꾸는 main 변경마다 재실시) |
 
 ### Northflank gates (NF)
 
@@ -193,6 +193,19 @@ P12(승인)의 조건은 이 사다리와 무관하게 그대로 유지된다.
 이미지 페이즈 실패로 현재 main HEAD의 운영 이미지는 존재하지 않으며,
 PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)은 그
 수정 PR이 merge된 뒤의 다음 main에서 다시 실시한다.
+
+### Evidence log (2026-11-03) — attest 이미지 수리(#43)·§2.2 재측정(bdc697e·bd28355)·PR-A 상위 100개 선정(#45)
+
+| gate | observed |
+|---|---|
+| P13(06f4208 실패) | main `06f4208`(PR #42 docs-only merge) push attest 런 [41560395236](https://github.com/wintrover/hongscanner/actions/runs/41560395236)(2026-11-03T01:32Z) **failure** — #41과 동일 인과(이미지 페이즈: 스테이징 컨텍스트에 `tools/container/cloud_supervisor.py` 부재 `COPY ... not found`; 수정 PR #43 merge 전에 docs-only merge가 먼저 들어와 실패가 재현). 정확 비트의 테스트 게이트·2바이너리 증명·아티팩트 업로드는 success(로컬 재설치 경로 보존), digest 검증·이미지 증명은 skip. **`main-06f4208` 이미지는 존재하지 않는다.** 누적 attest 게이트 실패 4회(`f4ad05c`·`97043fd`·`7eefd0d`·`06f4208`) |
+| P13(bdc697e) | main `bdc697e`(PR #43 merge — `de3e9fa`가 attest.yml 이미지 페이즈 스테이징에 `tools/container/cloud_supervisor.py` 추가) push attest 런 [41561345356](https://github.com/wintrover/hongscanner/actions/runs/41561345356)(2026-11-03T01:41Z) success — `IMAGE OK ref=ghcr.io/wintrover/hongscanner:main-bdc697e digest=sha256:7223d35d1fcf7b62f28a4d7df66a0aa60489f99b3f8593f7645cf410bf9d2052`. **2026-11-02 한계의 §2.2 재측정 약속 이행 — 이미지 공급망 복구.** `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `bdc697e91f…`) → `versions/0.1.0-main-bdc697e`(sha256 `d7c93362cc5698fca59230894f4f2862f75a4a0d30500935c64616f98b6ef071`, installed_utc 2026-11-03T01:49:49Z). smoke `runs/smoke-2026-11-03-bdc697e`: `REPLAY OK bars=22 signals=8 events=1 frames=24`·`VERDICT MATCH provenance=OK`·`COMMIT=ABSENT`·`EVENTS=6a51940f…` exit 0 |
+| P13(8a3e74a) | main `8a3e74a`(PR #44 docs-only, 모바일 실기기 LAN 경로 문서화) push attest 런 [41570141910](https://github.com/wintrover/hongscanner/actions/runs/41570141910)(2026-11-03T03:06Z) success — `IMAGE OK ref=ghcr.io/wintrover/hongscanner:main-8a3e74a digest=sha256:6ccd9c901986e5e3dea8f8bbd92fca04f1a59edbfe6c9956eebbe37f980d3257`. docs-only는 Nim 빌드 입력이 없으므로 재설치 생략(abd0c9a 전례와 동일 기준) |
+| P3(PR #45) | PR #45(`feat/subscription-top-100`, head `6a41baa`, 3커밋: `33ccf3a` core·`308b3ff` test·`6a41baa` docs) — 게이트 3중 실측: 로컬 독립 재실행 exit 0(신규 `SUBSCRIPTION SELECTION CONTRACT PASSED (56 checks)` 포함, 게이트 로그 1,320행)·브랜치 push ci `41582264560`·PR ci `41582353044` 전부 success(마커 각 1). merge push main ci `41583598959` success(`ALL CONTRACT SUITES PASSED` 2026-11-03T05:25:34Z 실측) |
+| P13(bd28355) | main `bd28355`(PR #45 merge) push attest 런 [41583598880](https://github.com/wintrover/hongscanner/actions/runs/41583598880)(2026-11-03T05:23Z) success — `IMAGE OK ref=ghcr.io/wintrover/hongscanner:main-bd28355 digest=sha256:11608eae52a4a269fbf25c218a3841c6afb0a82bd1a1fade2e1d36ca21a9f34e`. 아티팩트 sha256 `5ce00efe534cf9b4881ab4a6f78ecbaa2772de4f9808eb3ae910fe29684e58d2` == `hongscanner.sha256`. `tools/install-attested.sh` → `INSTALL VERIFY OK`(source_digest `bd283551d…`) → `versions/0.1.0-main-bd28355`, current 원자 전환(이전 버전 보존). selftest `SELFTEST bytes=OK bars=22 signals=8` exit 0(로컬 실행의 `provenance=NOT_CANONICAL`는 정상). smoke `runs/smoke-2026-11-03-bd28355`: `REPLAY OK bars=22 signals=8 events=1 frames=24`·`VERDICT MATCH provenance=OK`·`COMMIT=ABSENT`·`EVENTS=6a51940f…` exit 0 — **8빌드(0b065bf·885b009·ee53e93·c4afd4f·d787b37·bded2d4·bdc697e·bd28355) 교차 결정론**(이벤트 해시 동일; bdc697e·bd28355 smoke가 이번에 기여) |
+| 세션 관측(11-03) | 라이브 세션 2회(`ph1-2026-11-03-a` 10:25·`-b` 13:59)가 구 바이너리로 방향별 구독 cap 초과로 종료: `COLLECTOR CONTRACT: up direction exceeds the subscription cap 100: 949 codes`·`794 codes`(notice #49) — exit 2, 런·launcher log 보존. PR-A의 동기이자 "벤더가 양방향 상한 초과 반환"의 재확인. 로컬 컬렉터 `tools/collector/collector`를 bd28355 소스로 재빌드(Nim 2.2.10, 바이너리에 `kiwoom_response_order_first_100_v1`·`SUBSCRIPTION_TRUNCATED` 문자열 포함 확인) — 11-04 세션부터 상위 100개 선정 적용 |
+
+한계(2026-11-03): 위 증거는 게이트·공급망·설치·합성 재현에 관한 것이다. 상위 100개 선정의 라이브 발화(SUBSCRIPTION_TRUNCATED 이벤트·subscription_truncated 갭·전달 빈도)와 세션 완결(`session_end`+`VERDICT MATCH`)은 11-04 세션 실측 대기이며, 오늘 세션 2회는 구 바이너리 실패로 보존돼 있다. 11-03 종료 관측(15:40 예정)은 관측·보고 전용으로 수행한다.
 
 ## Completion Evidence
 
