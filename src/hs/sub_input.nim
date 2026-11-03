@@ -77,6 +77,16 @@
 ## Composition (pure; the official single-type REG contract — a REG
 ## carries exactly one {item, type} entry whose type list has a single
 ## element, the form of all 46 official examples):
+##   selectTopPerDirection the deterministic subscription selection
+##                         between candidate derivation (vendor_input)
+##                         and REG composition (policy
+##                         kiwoom_response_order_first_100_v1): each
+##                         direction's first maxPerDirection codes in
+##                         vendor response order, never re-ranked. An
+##                         excluded candidate is a recorded exclusion
+##                         (the collector's subscription_truncated gap,
+##                         judged SUBSCRIPTION_TRUNCATED), never "no
+##                         such candidate".
 ##   composeRegData        the 0B candidate REG data: one entry, item =
 ##                         up then down codes in vendor order, type
 ##                         ["0B"]. No other type can appear: the
@@ -179,6 +189,31 @@ const
   ## (§12.1), so the total splits as at most 100 per direction.
   maxPerDirection* = 100
   maxTotalSubscriptions* = 200
+
+  ## The user-approved deterministic selection policy (REPLAY_CONTRACT
+  ## §12.1): each direction's confirmed candidates are consumed in
+  ## Kiwoom response order — page then row, exactly the order
+  ## vendor_input.upDownCandidates returns — and the FIRST
+  ## maxPerDirection become the subscription set. Nothing is re-ranked
+  ## and no field is parsed into a number: the vendor's own sort
+  ## (sort_tp "1"/"3") is the ranking.
+  selectionPolicyId* = "kiwoom_response_order_first_100_v1"
+
+type
+  DirectionSelection* = object
+    ## The selection facts of one direction. candidateCount is what the
+    ## recorded pages affirm — the confirmed count, never an estimate
+    ## of a truncated remainder.
+    direction*: string      ## "up" | "down"
+    candidateCount*: int
+    selectedCount*: int
+    excludedCount*: int
+
+  SelectionResult* = object
+    ## The composition input plus the per-direction facts. facts[0] is
+    ## up, facts[1] is down — the §12.1 query order.
+    selected*: UpDownCandidates
+    facts*: array[2, DirectionSelection]
 
 proc serr(seqNo: int; f: VendorFailure; msg: string): ref SubInputError =
   let e = newException(SubInputError, msg)
@@ -447,6 +482,36 @@ proc parseWsRaw*(seqNo: int; raw: HcjValue): WsRawRecord =
     strField(seqNo, raw, "payload_hex", "ws_raw field"))
   WsRawRecord(seqNo: seqNo, channel: channel, conn: conn, t: t,
               payload: payload)
+
+# --------------------------------------------------- subscription selection
+
+proc firstN(xs: seq[string]; n: int): seq[string] =
+  ## The vendor-order prefix, verbatim: response order is the policy's
+  ## only ranking.
+  if xs.len <= n: xs else: xs[0 ..< n]
+
+proc selectTopPerDirection*(cands: UpDownCandidates): SelectionResult =
+  ## The one selection function between candidate derivation
+  ## (vendor_input.upDownCandidates) and REG composition
+  ## (composeRegData): keep each direction's first maxPerDirection
+  ## codes in vendor response order. Pure and deterministic — same
+  ## candidates, same selection. Candidates beyond the kept prefix are
+  ## excluded from this session's subscription: the caller records that
+  ## exclusion (the collector's subscription_truncated gap, judged
+  ## SUBSCRIPTION_TRUNCATED), it is never interpreted away. The
+  ## composeRegData caps stay untouched: this policy is what keeps the
+  ## derived sets inside them, not a replacement for the checks — a
+  ## 101-code set handed straight to composeRegData still raises.
+  result.selected.up = firstN(cands.up, maxPerDirection)
+  result.selected.down = firstN(cands.down, maxPerDirection)
+  result.facts[0] = DirectionSelection(
+    direction: "up", candidateCount: cands.up.len,
+    selectedCount: result.selected.up.len,
+    excludedCount: cands.up.len - result.selected.up.len)
+  result.facts[1] = DirectionSelection(
+    direction: "down", candidateCount: cands.down.len,
+    selectedCount: result.selected.down.len,
+    excludedCount: cands.down.len - result.selected.down.len)
 
 # ---------------------------------------------------------------- composition
 
