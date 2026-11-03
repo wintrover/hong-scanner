@@ -1,7 +1,8 @@
 # Build-context whitelist (tools/container/README.md §2/§4/§8): the staged
 # context carries only what the Dockerfile COPYs — the Dockerfile, the two
-# binaries (hongscanner + collector), serve.py, the collector sidecar and
-# its pinned requirements, the four notify modules and the calendar INDEX.
+# binaries (hongscanner + collector), serve.py, cloud_supervisor.py, the
+# collector sidecar and its pinned requirements, the four notify modules
+# and the calendar INDEX.
 # Everything else is excluded. In particular the real calendars/*.json are
 # gitignored user data and never enter an image or a build context; only
 # the git-tracked calendars/CALENDAR_INDEX.sha256 passes. No credential

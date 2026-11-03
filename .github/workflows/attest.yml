@@ -470,10 +470,13 @@ jobs:
           set -euo pipefail
           ctx="$(mktemp -d "${RUNNER_TEMP}/hs-image-ctx.XXXXXXXX")"
           mkdir -p "$ctx/bin" "$ctx/tools/api" "$ctx/tools/collector" \
-                   "$ctx/tools/notify" "$ctx/calendars"
+                   "$ctx/tools/container" "$ctx/tools/notify" \
+                   "$ctx/calendars"
           cp Dockerfile "$ctx/Dockerfile"
           cp .dockerignore "$ctx/.dockerignore"
           cp tools/api/serve.py "$ctx/tools/api/serve.py"
+          cp tools/container/cloud_supervisor.py \
+             "$ctx/tools/container/cloud_supervisor.py"
           cp calendars/CALENDAR_INDEX.sha256 "$ctx/calendars/CALENDAR_INDEX.sha256"
           cp tools/collector/sidecar.py "$ctx/tools/collector/sidecar.py"
           cp tools/collector/requirements.txt \
