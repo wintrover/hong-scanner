@@ -36,8 +36,11 @@
 ##                           CI_BUILD_OUT="$(mktemp -d)".
 ##
 ## Guards (each refuses the build, exit 1):
-##   origin remote is wintrover/hongscanner (public repo, so the anonymous
-##     https fetch below needs no credentials),
+##   origin remote is wintrover/hongscanner (the refetch below authenticates
+##     with CI_GIT_TOKEN through a per-command http.extraheader when that env
+##     is set -- required since the repository went private -- and stays
+##     anonymous otherwise, so local and public-repository callers are
+##     unchanged),
 ##   clean tree -- untracked files count as dirty, exactly like tools/build.sh,
 ##   HEAD == CI_BUILD_SHA,
 ##   origin/main re-fetched HERE still equals CI_BUILD_SHA, so the pushed SHA
@@ -130,8 +133,21 @@ if [ -e "$CI_BUILD_OUT/collector" ]; then
 fi
 
 ## Read-only refetch of main. Verbose on purpose: the fetched range is
-## evidence in the CI log.
-git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+## evidence in the CI log. Authentication is per-command only: when
+## CI_GIT_TOKEN is set the token rides a one-shot http.extraheader -- the
+## same AUTHORIZATION: basic base64("x-access-token:<token>") form
+## actions/checkout authenticates git with -- never the URL, the remote
+## config or an echo, so nothing is persisted after this command. attest.yml
+## supplies the job's GITHUB_TOKEN because the repository is private;
+## without the env the fetch stays anonymous (local callers keep using their
+## own credential helpers). A failed fetch still refuses the build --
+## fail-closed either way.
+if [ -n "${CI_GIT_TOKEN:-}" ]; then
+  git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$CI_GIT_TOKEN" | base64)" \
+    fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+else
+  git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+fi
 origin_main="$(git rev-parse refs/remotes/origin/main)"
 if [ "$origin_main" != "$CI_BUILD_SHA" ]; then
   echo "BUILD REFUSED: origin/main=$origin_main != CI_BUILD_SHA=$CI_BUILD_SHA (main moved on; refusing to attest a stale SHA)" >&2
