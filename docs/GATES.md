@@ -226,6 +226,15 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-05): 위 관측은 합성 재생 smoke·API 투영·오프라인 프로브에 관한 것이다. smoke는 합성 재생이므로 `VERDICT MATCH`는 재생 일치이지 실측 운영 승인이 아니다 — P12는 BLOCKED 유지(P9·P11 포함). ledger 14건은 실측 12건(2026-11-02 10건·2026-11-03 2건)과 합성 Drill 2건(`drill-2026-11-02-fcm`)의 혼합이며 session_id·원본 기록 기준 구분을 유지한다. 관측된 세션은 INCOMPLETE·미봉인이고 delivery ACCEPTED는 기기 도착이 아니다(FCM 토큰은 2026-11-03 무효화 — 재등록은 사용자 조치, 앱에 쓰기 경로 없음). 모바일 Timeline 행에는 session_id·data_quality가 미표출이며 Event Detail에서만 가시하다(알려진 미표출). no-data·HTTP 오류 화면은 NOT-MEASURED(오프라인 프로브는 서버 curl 실패만 실측). 앱 화면 표시는 본 게이트 미관측 — 실기기 표시는 google-services.json 제공 시 후속 관측 과제다. 본 증거 기록 PR은 docs-only(신규 코드 0줄)이며, merge는 CI 런 로그에서 `ALL CONTRACT SUITES PASSED`를 실측한 뒤에만 수행하는 운영자 수동 통제다 — 기술적 강제가 아니므로 branch protection 실효성은 UNKNOWN 그대로다(관리자가 보호 규칙을 변경할 수 있다는 기존 한계와 동일 근거).
 
+### Evidence log (2026-11-05, 밤) — main `244be87` post-merge attest 403 실패(GITHUB_TOKEN `actions: read` 강제 추정)
+
+| gate | observed |
+|---|---|
+| P13(244be87 실패) | main `244be87`(PR #48 docs-only merge, 2026-11-05T12:07:59Z) push attest 런 [42024560285](https://github.com/wintrover/hongscanner/actions/runs/42024560285)(생성 2026-11-05T12:08:02Z) **failure — attempt 1·2 모두 동일 양상**: CI-gate 단계의 `gh api repos/wintrover/hongscanner/actions/runs?head_sha=244be87…` 호출이 10회 연속 `HTTP 403 "Resource not accessible by integration"`(attempt 1: 12:08:12Z~12:10:30Z, 잡 12:08:05→12:10:32Z·attempt 2 리런: 12:17:20Z~12:19:38Z) → 원문 `CI GATE FAIL: gh api failed 10 consecutive times; refusing to attest` exit 1 — 실패를 성공으로 바꾸지 않는 fail-closed 정상 동작. 진단: `.github/`은 PR #43(`de3e9fa`) 이후 무변경인데 동일 단계가 11-03 07:06Z 런 [41594048461](https://github.com/wintrover/hongscanner/actions/runs/41594048461)(success)에서는 API 폴링 성공으로 통과(`ci push run for 712e76c… not completed yet` 출력 = 호출 성공) → **GitHub 측이 GITHUB_TOKEN의 Actions 런 목록 조회에 `actions: read` 권한을 강제하기 시작한 것으로 추정** — attest 잡 `permissions:` 블록 실측 `contents: read`·`id-token: write`·`attestations: write`·`packages: write`에 `actions: read` 부재(`.github/workflows/attest.yml`). 일시 장애 아님(리런 재현) |
+| 영향·수리 경계 | 누적 attest 게이트 실패 5번째(`f4ad05c`·`97043fd`·`7eefd0d`·`06f4208`·`244be87`). `main-244be87` 이미지·증명 없음. docs-only merge이므로 재설치 면제(전례)·운영 바이너리 무영향(설치 current는 여전히 bd28355). **게이트는 BLOCKED 유지** — 수리(attest.yml에 `actions: read` 추가)는 코드 변경이므로 별도 승인·변경으로 처리하며 본 PR(docs-only)은 기록만 한다 |
+
+한계(2026-11-05, attest 403): 원인 진단은 추정이다 — 관측된 사실은 "무변경 워크플로가 11-03 통과 → 11-05 403×2회"이며 GitHub의 권한 강제 시작 시점·공식 발표는 확인되지 않았다(UNKNOWN). 본 PR merge는 main push로 attest를 다시 트리거하며 동일 403 실패의 재현이 예상된다(고장 상태 동일) — 그 재현은 본 항목에 기록된 알려진 상태의 재현이며, 재현 확인을 위한 추가 PR은 만들지 않는다. attest 수리 전에는 모든 main push의 증명·이미지 산출이 차단되므로 동작 변경 merge의 재측정(AGENTS.md §2.2)을 수행하려면 수리 PR이 선행돼야 한다.
+
 ## Completion Evidence
 
 ```bash
