@@ -136,6 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
+      actions: read     # CI gate polls /actions/runs; any unspecified permission is none (workflow-syntax docs)
       contents: read
       id-token: write
       attestations: write
