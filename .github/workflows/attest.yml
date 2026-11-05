@@ -13,8 +13,10 @@ name: attest
 ##                     GitHub REST API is polled with a deadline; a missing,
 ##                     disabled, renamed or non-green ci run refuses the build;
 ##   3. exact build  — actions/checkout at github.sha (credentials not
-##                     persisted; the repo is public so the later anonymous
-##                     git fetch works), then tools/ci_build.sh re-verifies
+##                     persisted; ci_build.sh refetches main with a
+##                     per-command token http.extraheader because the
+##                     repository is private), then tools/ci_build.sh
+##                     re-verifies
 ##                     HEAD == pushed SHA == re-fetched origin/main tip, a
 ##                     clean tree (untracked counts, like tools/build.sh) and
 ##                     the pinned Nim 2.2.10;
@@ -112,12 +114,12 @@ name: attest
 ##       docker/setup-buildx-action     v4.4.1  f87e5991a6d7451dcb8d9637bfbc97413f497069
 ##       docker/build-push-action       v7.4.0  c3c9e263c25d99ce0380d002d59b67737d91b0dc
 ##     Their internals still execute inside this job and remain trusted code.
-##   - The CI gate reads this public repository's Actions data with the job
-##     token (contents: read only; the REST docs allow the workflow-runs
-##     endpoint without authentication for public resources, so `actions:
-##     read` is deliberately NOT granted today). If the repo ever turns
-##     private, that call fails closed; the fix then is to add `actions: read`
-##     to this job's permissions.
+##   - The CI gate reads this repository's Actions data with the job token.
+##     The repository is private (measured 2026-11-05; the 2026-11-03 gate
+##     passes predate the switch), so the workflow-runs call needs the
+##     `actions: read` permission granted by the 2026-11-05 403 repair
+##     (PR #50) -- before the switch the endpoint worked unauthenticated
+##     for public resources with contents: read only.
 ##   - Artifacts are retained 90 days (the public-repository cap). The
 ##     repository attestations and the digests in the build report outlive
 ##     them; `gh attestation verify` re-checks anytime.
@@ -238,6 +240,11 @@ jobs:
         env:
           CI_BUILD_SHA: ${{ github.sha }}
           CI_BUILD_REF: main
+          # Read-only refetch auth: the repository is private, so ci_build.sh
+          # cannot fetch main anonymously. Per-command http.extraheader only
+          # (checkout keeps persist-credentials: false on purpose); the token
+          # is never echoed and never lands in the URL or git config.
+          CI_GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash tools/ci_build.sh
 
       - name: Verify the binary's provenance claims against the runner git state
