@@ -141,9 +141,14 @@ fi
 ## supplies the job's GITHUB_TOKEN because the repository is private;
 ## without the env the fetch stays anonymous (local callers keep using their
 ## own credential helpers). A failed fetch still refuses the build --
-## fail-closed either way.
+## fail-closed either way. The base64 output is stripped of newlines
+## (tr -d '\n'): a long v2 job token (>42 chars) makes GNU base64 wrap at
+## 76 columns, and libcurl rejects the embedded newline in the header
+## (CURLE_BAD_FUNCTION_ARGUMENT, observed 2026-11-05 as "A libcurl function
+## was given a bad argument" on run 42040018677); the header must stay a
+## single line.
 if [ -n "${CI_GIT_TOKEN:-}" ]; then
-  git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$CI_GIT_TOKEN" | base64)" \
+  git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$CI_GIT_TOKEN" | base64 | tr -d '\n')" \
     fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 else
   git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
