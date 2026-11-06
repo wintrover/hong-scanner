@@ -46,8 +46,9 @@ proc newCollector(): Collector =
   startCollector(initCollectorConfig(
     "2026-10-29", "demo", "demo-profile",
     "000", "0000", "0", "0", "1", "0", "0", "1",
-    Params(lookback: 3, pullbackMinBp: 50, recoveryBp: 30, reboundMinBp: 50,
-           breakdownBp: 30, warmupBars: 0, holdOnDegraded: true),
+    Params(warmupBars: 0, lookbackBars: 3, trendMinBp: 50,
+           countermoveMinBp: 50, directionalTriggerBp: 30,
+           holdOnDegraded: true),
     calRaw()))
 
 proc newCfg(tokenSource: string): CollectorConfig =
@@ -56,8 +57,9 @@ proc newCfg(tokenSource: string): CollectorConfig =
   initCollectorConfig(
     "2026-10-29", "demo", "demo-profile",
     "000", "0000", "0", "0", "1", "0", "0", "1",
-    Params(lookback: 3, pullbackMinBp: 50, recoveryBp: 30, reboundMinBp: 50,
-           breakdownBp: 30, warmupBars: 0, holdOnDegraded: true),
+    Params(warmupBars: 0, lookbackBars: 3, trendMinBp: 50,
+           countermoveMinBp: 50, directionalTriggerBp: 30,
+           holdOnDegraded: true),
     calRaw(), tokenSource)
 
 proc evLine(ps: seq[HcjPair]): string =

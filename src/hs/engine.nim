@@ -1,34 +1,47 @@
-## Two independent state machines over shared closed bars.
-## Output vocabulary (no "short"): bullish_pullback_reversal /
-## bearish_rebound_failure, plus SIGNAL_HELD for degraded bars.
-## Fail-closed rules (contract §6): a degraded bar never yields a machine
-## verdict (holdOnDegraded only decides whether the hold is reported), no
-## verdict is derived from an empty_gap bar's placeholder prices, and no
-## verdict is derived from an evidence window that still contains a
-## degraded/vol_partial/gap/empty bar: each machine checks only the bars it
-## actually reads and resumes once the last tainted bar has slid out of that
-## window. A verdict suppressed this way is reported as SIGNAL_HELD carrying
-## the most recent tainted bar's reason (the taint that binds the window
-## longest); holdOnDegraded=false suppresses it silently, as for the bar
-## itself. breakdownBp is parsed but deliberately not applied: its reference
-## price and comparison rule are undefined (docs/LIMITS.md, strategy
-## contract) and must not be invented here. Firing a threshold-less
-## breakdown would trade safety for test convenience, so the bearish verdict
-## itself fails closed as SIGNAL_HELD reason="breakdown_unverified" (silent
-## when holdOnDegraded=false) until a formula is approved; a tainted window
-## still reports the taint's own reason first. The bullish machine is
-## unaffected.
+## One symmetric judgment function over shared closed bars (frozen VS-A,
+## REPLAY_CONTRACT §6; ASSUMPTIONS P23). Direction is the only asymmetry:
+## `d=+1` is up, `d=−1` is down, and both verdicts come from the same code
+## path with the same absolute thresholds — per-direction thresholds are a
+## contract violation.
+##
+## Declared reference price (P_ref of S_d = d × (P − P_ref)/P_ref × 10⁴):
+## the close of the symbol's first untainted, non-empty bar with a positive
+## close. Every bp comparison in both directions divides by that one anchor,
+## so mirroring a stream around it (P → 2·P_ref − P) negates every S_d
+## exactly — including the truncated integer division — and the acceptance
+## mirror test (§6) is exact arithmetic, not data tuning.
+##
+## Structure, identical in both directions (d is the only parameter):
+## the observation window is the last lookback_bars+1 bars of the symbol's
+## history (the same window for both directions); (1) trend confirmation —
+## the direction's pivot is the extreme close of the window before the
+## current bar (ties -> earliest bar) and must stand at least trend_min_bp
+## from the anchor; (2) counter-move confirmation — the opposite extreme
+## from the pivot to just before the current bar (ties -> latest bar) must
+## retrace at least countermove_min_bp; (3) resumption — the current close
+## must recover at least directional_trigger_bp from the counter-move
+## extreme. Empty bars never trade, so they are never selected as extremes;
+## their placeholder prices cannot fabricate a pivot.
+##
+## Fail-closed (contract §6): a degraded bar never yields a verdict — it is
+## reported as SIGNAL_HELD with its own reason when hold_on_degraded, and
+## judgment skips it. A verdict whose evidence window still contains a
+## degraded/vol_partial/gap/empty/out-of-order bar is held until the last
+## tainted bar slides out of the shared window; one SIGNAL_HELD per bar
+## carries the most recent tainted bar's reason (the one that binds the
+## window longest). hold_on_degraded=false suppresses holds silently. Real
+## signals carry reason:"". There is no "breakdown_unverified" path: the
+## bearish verdict is the mirror of the bullish one and fires for real.
 import std/[tables, algorithm]
 import hcj, bars
 
 type
   Params* = object
-    lookback*: int
-    pullbackMinBp*: int
-    recoveryBp*: int
-    reboundMinBp*: int
-    breakdownBp*: int
     warmupBars*: int
+    lookbackBars*: int
+    trendMinBp*: int
+    countermoveMinBp*: int
+    directionalTriggerBp*: int
     holdOnDegraded*: bool
 
   Signal* = object
@@ -43,17 +56,15 @@ type
     params*: Params
     sessionDate*: string
     hist*: Table[string, seq[Bar]]
+    anchors*: Table[string, int64]  ## per-symbol declared reference close
     signals*: seq[Signal]
 
 proc initEngine*(p: Params; sessionDate: string): Engine =
   result.params = p
   result.sessionDate = sessionDate
   result.hist = initTable[string, seq[Bar]]()
+  result.anchors = initTable[string, int64]()
   result.signals = @[]
-
-proc bp(delta, base: int64): int =
-  if base == 0: return 0
-  int((delta * 10000'i64) div base)
 
 proc holdReason(bar: Bar): string =
   if bar.empty: return "empty_gap"
@@ -84,6 +95,37 @@ proc emit(e: var Engine; bar: Bar; name: string; reason = "") =
                        barIndex: bar.index, signal: name, reason: reason,
                        price: bar.close))
 
+proc judge(e: Engine; hs: seq[Bar]; d: int): bool =
+  ## Would direction d's verdict fire on the current (last) bar? Pure check:
+  ## it emits nothing and reads only the shared window plus the anchor. The
+  ## caller owns the taint decision, so this stays the single judgment path
+  ## for both directions.
+  let n = hs.len
+  let i = n - 1
+  let s = n - 1 - e.params.lookbackBars
+  let a = e.anchors[hs[i].symbol]
+  # (1) trend pivot: the direction's extreme close before the current bar,
+  #     ties -> earliest bar; empty bars are never eligible extremes.
+  var p = -1
+  for k in s ..< i:
+    if hs[k].empty: continue
+    if p < 0 or d * hs[k].close > d * hs[p].close: p = k
+  if p < 0: return false
+  let trendBp = d * int((hs[p].close - a) * 10000'i64 div a)
+  if trendBp < e.params.trendMinBp: return false
+  # (2) counter-move extreme from the pivot, ties -> latest bar (the most
+  #     recent opposite extreme before the current bar).
+  var c = -1
+  for k in p ..< i:
+    if hs[k].empty: continue
+    if c < 0 or d * hs[k].close <= d * hs[c].close: c = k
+  if c < 0: return false
+  let depthBp = d * int((hs[p].close - hs[c].close) * 10000'i64 div a)
+  if depthBp < e.params.countermoveMinBp: return false
+  # (3) resumption trigger at the current close from the counter-move extreme.
+  let triggerBp = d * int((hs[i].close - hs[c].close) * 10000'i64 div a)
+  triggerBp >= e.params.directionalTriggerBp
+
 proc onBar*(e: var Engine; bar: Bar) =
   var hs = e.hist.mgetOrPut(bar.symbol, @[])
   hs.add(bar)
@@ -92,58 +134,30 @@ proc onBar*(e: var Engine; bar: Bar) =
     if e.params.holdOnDegraded:
       e.emit(bar, "SIGNAL_HELD", holdReason(bar))
     return
-  if bar.index < e.params.warmupBars:
-    return
+  # The declared reference price: the first untainted, non-empty, positive
+  # close of the symbol's history. Until one exists no verdict is derivable,
+  # so the bar fails closed (no verdict, no hold record).
+  if bar.symbol notin e.anchors and not tainted(bar) and not bar.empty and
+      bar.close > 0:
+    e.anchors[bar.symbol] = bar.close
+  if bar.symbol notin e.anchors: return
+  if bar.index < e.params.warmupBars: return
+  let L = e.params.lookbackBars
   let n = hs.len
-  let L = e.params.lookback
-  if L < 1 or n < L + 2:
-    return
+  if L < 1 or n < L + 1: return
+  let s = n - 1 - L
   let cur = hs[n - 1]
-  let prev = hs[n - 2]
-  let refBar = hs[n - 1 - L]
-
-  # Each machine is fail-closed over the exact bars it reads. The bullish
-  # machine reads cur, prev, refBar and the priorHigh scan (2L bars back);
-  # the bearish machine reads cur, refBar and the priorLow/maxHigh scan
-  # (L bars back). A tainted bar anywhere in a machine's window holds that
-  # machine's verdict until the window has slid past the taint; the other
-  # machine is unaffected.
-  let bullFirst = max(0, n - 1 - 2 * L)
-  if not refBar.empty and cur.close > refBar.close:
-    var priorHigh: int64 = 0
-    for k in bullFirst ..< n - 1:
-      if hs[k].close > priorHigh: priorHigh = hs[k].close
-    if priorHigh > 0:
-      let depth = bp(priorHigh - cur.low, priorHigh)
-      let rec = bp(cur.close - prev.close, prev.close)
-      if not prev.empty and depth >= e.params.pullbackMinBp and
-          rec >= e.params.recoveryBp:
-        let taint = windowTaint(hs, bullFirst, n - 1)
-        if taint.len == 0:
-          e.emit(cur, "bullish_pullback_reversal")
-        elif e.params.holdOnDegraded:
-          e.emit(cur, "SIGNAL_HELD", taint)
-
-  let bearFirst = max(0, n - 1 - L)
-  if not refBar.empty and cur.close < refBar.close:
-    var priorLow = high(int64)
-    var maxHigh: int64 = 0
-    for k in bearFirst ..< n - 1:
-      if hs[k].low < priorLow: priorLow = hs[k].low
-      if hs[k].high > maxHigh: maxHigh = hs[k].high
-    if priorLow != high(int64) and priorLow > 0:
-      let reboundBp = bp(maxHigh - priorLow, priorLow)
-      if reboundBp >= e.params.reboundMinBp and cur.close < priorLow:
-        # Evidence-window handling first and unchanged: a tainted window
-        # reports the taint's own reason. A clean window then hits the
-        # breakdown gate: breakdownBp has no approved reference price or
-        # comparison rule, so the verdict fails closed instead of firing a
-        # threshold-less breakdown. Restoring bearish_rebound_failure here
-        # requires an approved formula, not a guessed one.
-        let taint = windowTaint(hs, bearFirst, n - 1)
-        let reason = if taint.len > 0: taint else: "breakdown_unverified"
-        if e.params.holdOnDegraded:
-          e.emit(cur, "SIGNAL_HELD", reason)
+  let fireUp = e.judge(hs, 1)
+  let fireDown = e.judge(hs, -1)
+  if not fireUp and not fireDown: return
+  # The evidence window is shared by both directions, so a taint holds both
+  # identically and one hold record per bar carries the binding reason.
+  let taint = windowTaint(hs, s, n - 1)
+  if taint.len == 0:
+    if fireUp: e.emit(cur, "bullish_pullback_reversal")
+    if fireDown: e.emit(cur, "bearish_rebound_failure")
+  elif e.params.holdOnDegraded:
+    e.emit(cur, "SIGNAL_HELD", taint)
 
 proc sortedSignals*(e: Engine): seq[Signal] =
   result = e.signals

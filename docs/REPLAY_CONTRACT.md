@@ -1,4 +1,4 @@
-# Hong Scanner — Replay Contract (VS-1 baseline, VS-2/VS-3 targets, v6.4)
+# Hong Scanner — Replay Contract (VS-1 baseline, VS-2/VS-3 targets, v6.5)
 
 This document states the intended VS-1 contract. Tests cover selected cases;
 passing them does not prove every statement or replace review of the actual
@@ -149,15 +149,10 @@ There is no `short`.
   violation (exit 2).
 - Sort order is `(symbol, bar_index, signal)`; iteration order never leaks.
 
-### 6.1 Legacy engine (until the symmetric rewrite lands)
-
-The pre-VS-A engine implements two independent, asymmetric state machines:
-a `2*lookback` up window vs a `lookback` down window, close-based up pivots
-vs high-based down pivots, and a `breakdown_bp` that is parsed but never
-applied — every bearish candidate is held `breakdown_unverified` and
-`bearish_rebound_failure` is unreachable. It does **not** conform to §6.
-Runs sealed before the rewrite are replayed under their own commit's binary
-(§8 check 1, §11); runs sealed after the rewrite must satisfy §6.
+Runs sealed before the VS-1 symmetric rewrite (2026-11-06) were produced by
+the legacy asymmetric engine; §8 check 1 replays each run only under its own
+commit's binary, so those runs keep their legacy semantics and every run
+sealed after the rewrite must satisfy §6.
 
 ## 7. Artifacts
 

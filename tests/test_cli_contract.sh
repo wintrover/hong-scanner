@@ -92,7 +92,7 @@ doctor() { (cd "$WORK" && "$BIN" doctor); }
 echo "--- selftest"
 RC=0; OUT="$(selftest)" || RC=$?
 assert_eq "selftest exits 0" 0 "$RC"
-assert_contains "selftest reports bytes OK" "$OUT" "SELFTEST bytes=OK bars=22 signals=8"
+assert_contains "selftest reports bytes OK" "$OUT" "SELFTEST bytes=OK bars=22 signals=4"
 assert_contains "selftest reports non-canonical provenance" "$OUT" "SELFTEST provenance=NOT_CANONICAL"
 LEFT="$(find "$SANDBOX/tmp" -maxdepth 1 -name 'hongscanner-selftest-*' | wc -l)"
 assert_eq "selftest cleans up its unique scratch dir" 0 "$LEFT"
@@ -193,7 +193,7 @@ echo "--- replay/verify"
 mkdir -p "$WORK/runs"
 RC=0; OUT="$(cd "$WORK" && "$BIN" replay --in fixtures/smoke/input.hcj.jsonl --out runs/base)" || RC=$?
 assert_eq "replay of the smoke fixture exits 0" 0 "$RC"
-assert_contains "replay reports the tuned counts" "$OUT" "REPLAY OK bars=22 signals=8"
+assert_contains "replay reports the tuned counts" "$OUT" "REPLAY OK bars=22 signals=4"
 
 BEFORE="$(sha256sum "$WORK/runs/base/input.hcj.jsonl")"
 RC=0; ERR="$(cd "$WORK" && "$BIN" replay --in runs/base/input.hcj.jsonl --out runs/base 2>&1)" || RC=$?
