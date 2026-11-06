@@ -116,25 +116,48 @@ basis the live subscription-set check will use.)
 
 ## 6. Signals
 
-Two independent state machines share the same closed bars. There is no
-`short`; the output vocabulary is `bullish_pullback_reversal`,
-`bearish_rebound_failure`, and `SIGNAL_HELD`.
+One symmetric judgment function serves both directions (frozen VS-A,
+2026-11-06). `d=+1` is up, `d=−1` is down; the output vocabulary is
+`bullish_pullback_reversal`, `bearish_rebound_failure`, and `SIGNAL_HELD`.
+There is no `short`.
 
-- A tainted bar cannot support a verdict. The bullish evidence window spans
-  up to `2*lookback` prior bars; the bearish window spans `lookback` prior
-  bars. A verdict that depends on degraded, partial-volume, empty, out-of-order
+- Directional movement is `S_d = d × (P − P_ref)/P_ref × 10⁴` in bp against
+  the declared reference price. Both directions share one absolute threshold
+  family: `trend_min_bp` (trend confirmation), `countermove_min_bp`
+  (pullback/rebound confirmation), `directional_trigger_bp` (final trigger).
+  Per-direction thresholds are a contract violation.
+- The structure is identical in both directions: (1) trend confirmation over
+  the shared observation window (`warmup_bars`, `lookback_bars` — the same
+  window for both directions), (2) counter-move confirmation from the
+  direction's pivot, (3) resumption confirmation of at least
+  `directional_trigger_bp` from the counter-move extreme. The reference
+  series is close for both directions; pivot selection, tie-breaking when
+  equal extremes repeat, and bar-eligibility rules are direction-symmetric.
+- A tainted bar cannot support a verdict — identically in both directions.
+  A verdict that depends on degraded, partial-volume, empty, out-of-order
   or gap-marked evidence is held until the affected bar leaves its window.
   With `hold_on_degraded`, `SIGNAL_HELD` reports the most recent tainted
   bar's reason; otherwise the verdict is suppressed. Real signals carry
   `reason:""`.
-- `breakdown_bp` has no approved reference price or comparison rule. A bearish
-  candidate is therefore held with `breakdown_unverified`, never emitted as
-  `bearish_rebound_failure`; evidence-window taint takes precedence. With
-  `hold_on_degraded=false`, this hold is not emitted.
+- Symmetry is testable: mirroring an input stream's prices around a fixed
+  reference (P → 2·P_ref − P, equal-magnitude opposite moves) must produce
+  the opposite-direction signal at the same bar indices under the same
+  absolute thresholds. This mirror test is the acceptance test of the
+  rewrite; a direction-exceptional success path is forbidden.
 - Every signal references `(session_date, symbol, bar_index)` present in
   `bars.hcj.jsonl` with `closed:true`. A signal for an open bar is a contract
   violation (exit 2).
 - Sort order is `(symbol, bar_index, signal)`; iteration order never leaks.
+
+### 6.1 Legacy engine (until the symmetric rewrite lands)
+
+The pre-VS-A engine implements two independent, asymmetric state machines:
+a `2*lookback` up window vs a `lookback` down window, close-based up pivots
+vs high-based down pivots, and a `breakdown_bp` that is parsed but never
+applied — every bearish candidate is held `breakdown_unverified` and
+`bearish_rebound_failure` is unreachable. It does **not** conform to §6.
+Runs sealed before the rewrite are replayed under their own commit's binary
+(§8 check 1, §11); runs sealed after the rewrite must satisfy §6.
 
 ## 7. Artifacts
 
@@ -156,6 +179,11 @@ Two independent state machines share the same closed bars. There is no
 closed, degraded, empty, gap_edge, high, low, open, out_of_order,
 session_class, symbol, ticks, vol, vol_partial`.
 
+`origin` is an optional bar field (P21, target §12.8): present only as
+`origin:"BACKFILL"` on bars derived from ka10080 records; absent means
+`LIVE`. Pre-contract streams and live-only runs stay byte-identical to the
+old format.
+
 `events.hcj.jsonl` fields: `data_quality, event_id, event_type, evidence_ref,
 observed_at, rule_id, rule_version, session_id, severity` — plus `direction`
 and `rank` on candidate-transition facts (EXITED carries no rank) and
@@ -167,7 +195,10 @@ symbol`.
 
 `run.json` fields: `bar_count, build{build_time,dirty,nim_version,
 origin_main_sha,source_ref}, calendar_sha256, code_commit, config_sha256,
-egress_ip, host, pid, run_id, session_date, signal_count, started_at`.
+contract_version, egress_ip, host, pid, run_id, session_date, signal_count,
+started_at`. `contract_version` (added VS-A, 2026-11-06; P24) identifies
+the input-stream contract generation; it is non-checksummed and absent on
+pre-VS-A runs.
 
 `config_sha256`/`calendar_sha256` are SHA-256 over the canonical bytes of
 record 2 / record 1 **without** a trailing LF.
@@ -223,6 +254,12 @@ serialization stability. It never contacts a vendor or the network.
 reproducing a measured run needs those files; the repository intentionally
 does not contain market data.
 
+Calendar authority is three separable evidences (P25): source match
+(`tools/check_calendar_source.py`), integrity (the INDEX hash), and the
+operator's explicit approval of the scope (first/last trading day). Byte
+equality — an INDEX match or a restored copy's identical hash — is never
+approval by itself.
+
 `sha256` is a byte-identity tool. It is not evidence that prices are correct
 (G4) or that the strategy is sound (PH-2).
 
@@ -276,7 +313,12 @@ auditable:
   subscription-truncated-v1, HIGH/INCOMPLETE; the
   `DATA_GAP_SUSPECTED` fact of the same record stays): an exclusion is
   never "no candidate", and the candidate events keep judging the FULL
-  recorded universe. The policy id is recorded in the config record
+  recorded universe. The cap is a declared scope limit, mirroring the
+  pagination provision above: the session is not INCOMPLETE for the
+  subscription truncation alone — what stays blocking for approval is an
+  unresolved data gap (pages not fetched below the cap, unconfirmed
+  mandatory subscriptions, connection loss; GATES Approval condition 3).
+  The policy id is recorded in the config record
   (`selection_policy`). Cross-direction duplicates (a code in both
   kept sets) are still a rejection (fail-closed; no auto-dedup), and
   the composition caps (`checkDirectionCaps`) stay as unchanged
@@ -418,6 +460,35 @@ precedent and no official prohibition).
   officially undocumented — the 337-API spec JSON contains zero "ping"
   mentions; the samples and SDK code are the only evidence — so both
   are G2 observation items, never assumed.
+
+### 12.8 Data lifecycle: origin, session modes (target contract — VS-2B/VS-2C, no producer yet)
+
+Target contract for P21/P22; no producer exists yet.
+
+- `origin` (P21): bars derived from `ws_frame` ticks carry no `origin` field
+  (`LIVE`). Backfill enters as preserved REST evidence of `ka10080`
+  (3-minute bars): the raw response body and the declared request scope are
+  recorded (the §12.2 byte-evidence rules apply verbatim), and bars derived
+  from those records carry `origin:"BACKFILL"` in `bars.hcj.jsonl` (§7).
+  Backfill bars never masquerade as live ticks: no synthetic `ws_frame` is
+  fabricated from a REST bar.
+- Session modes (P22) are declared in the config record (`session_mode`):
+  `FULL_SESSION` (live collection from before the open through close),
+  `LATE_START` (past intervals covered by backfill only, live from start
+  onward), `CLOSE_RECONCILIATION` (post-close acquisition reconciling the
+  final bars and closes). A `LATE_START` run never auto-promotes to
+  `FULL_SESSION`: the 300 s candidate churn, the WS tick order and every
+  unobserved event of the downtime are unrecoverable, and the run's
+  approval scope is bounded by what was actually observed live plus the
+  verified recovery range.
+- Close-reconciliation acquisitions are `origin:"BACKFILL"` records whose
+  purpose (reconciliation) is recorded in the attempt record; reconciliation
+  compares the reconciled bars against the live-built bars and records the
+  comparison — it is never proof of full live collection.
+- Dispatcher outcomes (`STARTED`, `HOLIDAY`, `ALREADY_COMMITTED`,
+  `UNRECOVERABLE`, `BLOCKED`) are operational state recorded outside facts
+  (the §13.6 three-homes rule); `HOLIDAY`/`UNRECOVERABLE` are dispatcher
+  outcomes, not session modes.
 
 ## 13. Events (VS-3 contract)
 
