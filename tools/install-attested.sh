@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
-## Minimal atomic install path for the GitHub-attested binary (GATES.md P13).
+## Minimal atomic install path for the GitHub-attested binaries (GATES.md P13).
 ##
-## Verifies a downloaded hongscanner binary by delegating entirely to
-## `gh attestation verify`, pinned to: repo wintrover/hongscanner, signer
-## workflow .github/workflows/attest.yml (gh's [host/]<owner>/<repo>/<path>
-## form: wintrover/hongscanner/.github/workflows/attest.yml), source ref
+## Installs the TWO attested release binaries of one main SHA (hongscanner
+## and collector) as a single atomic unit. Each binary is verified by
+## delegating entirely to `gh attestation verify`, pinned to: repo
+## wintrover/hongscanner, signer workflow .github/workflows/attest.yml (gh's
+## [host/]<owner>/<repo>/<path> form:
+## wintrover/hongscanner/.github/workflows/attest.yml), source ref
 ## refs/heads/main, the exact source digest given as an argument, and
-## GitHub-hosted runners only (--deny-self-hosted-runners). This script never
-## reimplements, replaces or fakes any part of attestation verification: if
-## `gh` is unavailable, or gh refuses the artifact, nothing is installed.
-## Real GitHub attestation verification is not covered by the repo's tests;
-## it is executed on the attested binary after merge.
+## GitHub-hosted runners only (--deny-self-hosted-runners). The attest
+## workflow signs hongscanner-linux-<arch> and collector-linux-<arch> as
+## separate subjects of the same run, so both binaries verify against the
+## same pinned facts. This script never reimplements, replaces or fakes any
+## part of attestation verification: if `gh` is unavailable, or gh refuses
+## either artifact, nothing is installed. Real GitHub attestation
+## verification is not covered by the repo's tests; it is executed on the
+## attested binaries after merge.
 ##
 ## On success it creates (and never deletes or overwrites anything):
-##   INSTALL_ROOT/versions/VERSION/hongscanner    0755, the verified bytes
-##   INSTALL_ROOT/versions/VERSION/SHA256         actual sha256 of the
-##                                                verified binary,
-##                                                `sha256sum -c` format
-##   INSTALL_ROOT/versions/VERSION/PROVENANCE.txt the pinned verification facts
-##   INSTALL_ROOT/current -> versions/VERSION     atomic switch via rename(2)
+##   INSTALL_ROOT/versions/VERSION/hongscanner  0755, the verified bytes
+##   INSTALL_ROOT/versions/VERSION/collector    0755, the verified bytes
+##   INSTALL_ROOT/versions/VERSION/SHA256       actual sha256 of both
+##                                               verified binaries,
+##                                               `sha256sum -c` format
+##   INSTALL_ROOT/versions/VERSION/PROVENANCE.txt the pinned verification
+##                                               facts and both sha256s
+##   INSTALL_ROOT/current -> versions/VERSION   atomic switch via rename(2)
+##
+## Atomic two-binary selection: BOTH binaries are fully verified
+## (attestation and hash, before anything at all is written), BOTH staged
+## copies are hash-checked, and the finalized version is re-read before the
+## single `current` switch. If either binary fails any check, the new
+## version is never selected: an existing `current` symlink is left exactly
+## as it was and the script exits nonzero (fail-closed).
 ##
 ## Fail-closed policy:
 ##   - An existing versions/VERSION, or a `current` that is not a symlink,
@@ -30,9 +44,9 @@
 ##     replaced only by renaming a uniquely named temp symlink over it
 ##     (mv -T). Concurrent installs therefore cannot interleave, and a
 ##     reader always sees either the old or the new complete version.
-##   - TOCTOU: the binary is hashed before verification, re-hashed after
+##   - TOCTOU: each binary is hashed before verification, re-hashed after
 ##     it, the staged copy is hashed before being finalized, and the
-##     finalized version is re-read (metadata re-compared, binary
+##     finalized version is re-read (metadata re-compared, both binaries
 ##     re-hashed) immediately before the `current` switch; any difference
 ##     refuses the install and the version is left unselected.
 ##   - Install-path safety: the script runs with umask 022 (directories
@@ -73,9 +87,12 @@ readonly SIGNER_WORKFLOW="wintrover/hongscanner/.github/workflows/attest.yml"
 readonly SOURCE_REF="refs/heads/main"
 
 usage() {
-  printf 'usage: tools/install-attested.sh BINARY VERSION SOURCE_DIGEST INSTALL_ROOT\n\n' >&2
-  printf '  BINARY         downloaded hongscanner binary to verify and install\n' >&2
+  printf 'usage: tools/install-attested.sh HONGSCANNER COLLECTOR VERSION SOURCE_DIGEST INSTALL_ROOT\n\n' >&2
+  printf '  HONGSCANNER    downloaded hongscanner binary to verify and install\n' >&2
+  printf '  COLLECTOR      downloaded collector binary to verify and install\n' >&2
   printf '  VERSION        version label used for INSTALL_ROOT/versions/VERSION\n' >&2
+  printf '                 (both binaries land in the SAME version directory\n' >&2
+  printf '                 and are selected together by one current switch)\n' >&2
   printf '  SOURCE_DIGEST  exact expected source commit digest: bare 40- or\n' >&2
   printf '                 64-hex sha. A sha1:/sha256: prefix is accepted and\n' >&2
   printf '                 stripped, because gh matches the digest verbatim\n' >&2
@@ -102,8 +119,8 @@ require_safe_dir() { # path label -- real dir, not a symlink, not group/other-wr
   fi
 }
 
-if [ "$#" -ne 4 ]; then usage; exit 2; fi
-binary="$1"; version="$2"; source_digest="$3"; root="$4"
+if [ "$#" -ne 5 ]; then usage; exit 2; fi
+hs_binary="$1"; col_binary="$2"; version="$3"; source_digest="$4"; root="$5"
 
 if ! [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$ ]]; then
   die 2 "invalid VERSION [$version]: must match ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\$"
@@ -116,7 +133,8 @@ source_digest="${source_digest#sha1:}"
 source_digest="${source_digest#sha256:}"
 while [ "$root" != "/" ] && [ "${root%/}" != "$root" ]; do root="${root%/}"; done
 [ -n "$root" ] || die 2 "INSTALL_ROOT must not be empty"
-[ -f "$binary" ] || die 2 "BINARY [$binary] is not a regular file"
+[ -f "$hs_binary" ] || die 2 "HONGSCANNER [$hs_binary] is not a regular file"
+[ -f "$col_binary" ] || die 2 "COLLECTOR [$col_binary] is not a regular file"
 command -v gh >/dev/null 2>&1 \
   || die 3 "gh not found in PATH; attestation verification is delegated to gh and cannot be skipped"
 
@@ -128,8 +146,13 @@ if [ -e "$root" ] && [ ! -d "$root" ]; then
 fi
 [ ! -d "$root" ] || require_safe_dir "$root" "install root"
 
-# A relative BINARY starting with '-' would be parsed as a gh flag.
-case "$binary" in -*) binary="./$binary" ;; esac
+# Relative paths starting with '-' would be parsed as gh flags.
+case "$hs_binary" in -*) hs_binary="./$hs_binary" ;; esac
+case "$col_binary" in -*) col_binary="./$col_binary" ;; esac
+
+bin_path=("$hs_binary" "$col_binary")
+bin_name=(hongscanner collector)
+bin_digest=()
 
 sha256_of() { # file -> sha256 hex digest on stdout
   local line
@@ -137,19 +160,26 @@ sha256_of() { # file -> sha256 hex digest on stdout
   printf '%s' "${line%% *}"
 }
 
-digest_verified="$(sha256_of "$binary")" || die 1 "cannot hash BINARY [$binary]"
+# Verify BOTH artifacts before anything is written: a refusal here leaves
+# the filesystem completely untouched and any existing `current` as it is.
+for i in 0 1; do
+  bin="${bin_path[$i]}"
+  name="${bin_name[$i]}"
+  digest_verified="$(sha256_of "$bin")" || die 1 "cannot hash $name [$bin]"
 
-gh attestation verify "$binary" \
-  --repo "$REPO" \
-  --signer-workflow "$SIGNER_WORKFLOW" \
-  --source-ref "$SOURCE_REF" \
-  --source-digest "$source_digest" \
-  --deny-self-hosted-runners \
-  || die 4 "gh attestation verify failed (exit $?); nothing was installed"
+  gh attestation verify "$bin" \
+    --repo "$REPO" \
+    --signer-workflow "$SIGNER_WORKFLOW" \
+    --source-ref "$SOURCE_REF" \
+    --source-digest "$source_digest" \
+    --deny-self-hosted-runners \
+    || die 4 "gh attestation verify failed for $name [$bin] (exit $?); nothing was installed"
 
-digest_recheck="$(sha256_of "$binary")" || die 1 "cannot re-hash BINARY [$binary]"
-[ "$digest_verified" = "$digest_recheck" ] || die 5 \
-  "binary changed during verification (TOCTOU): $digest_verified -> $digest_recheck"
+  digest_recheck="$(sha256_of "$bin")" || die 1 "cannot re-hash $name [$bin]"
+  [ "$digest_verified" = "$digest_recheck" ] || die 5 \
+    "$name changed during verification (TOCTOU): $digest_verified -> $digest_recheck"
+  bin_digest+=("$digest_verified")
+done
 
 staged=""
 tmplink=""
@@ -169,21 +199,31 @@ fi
 mkdir -- "$vdir" \
   || die 6 "lost the concurrent race for $vdir; nothing was overwritten"
 
-staged="$(mktemp -- "$vdir/.incoming.XXXXXX")" \
-  || die 1 "cannot create a staging temp file in $vdir"
-cp -- "$binary" "$staged" || die 1 "cannot stage a copy of BINARY [$binary]"
-digest_staged="$(sha256_of "$staged")" || die 1 "cannot hash the staged copy"
-[ "$digest_staged" = "$digest_verified" ] || die 5 \
-  "staged copy differs from the verified binary (TOCTOU): $digest_verified -> $digest_staged"
+# Stage and finalize BOTH binaries inside the same version directory. A
+# failure here leaves the version incomplete and -- critically --
+# unselected (no `current` switch happens below).
+for i in 0 1; do
+  bin="${bin_path[$i]}"
+  name="${bin_name[$i]}"
+  want="${bin_digest[$i]}"
 
-chmod 0755 "$staged" || die 1 "cannot set 0755 on the staged copy"
-final="$vdir/hongscanner"
-[ ! -e "$final" ] || die 6 "unexpected existing file at $final"
-mv -T -- "$staged" "$final" || die 1 "cannot finalize $final"
-staged=""
+  staged="$(mktemp -- "$vdir/.incoming.XXXXXX")" \
+    || die 1 "cannot create a staging temp file in $vdir"
+  cp -- "$bin" "$staged" || die 1 "cannot stage a copy of $name [$bin]"
+  digest_staged="$(sha256_of "$staged")" || die 1 "cannot hash the staged copy of $name"
+  [ "$digest_staged" = "$want" ] || die 5 \
+    "staged $name copy differs from the verified binary (TOCTOU): $want -> $digest_staged"
 
-sha_line="$(printf '%s  hongscanner' "$digest_verified")"
-if ! printf '%s\n' "$sha_line" > "$vdir/SHA256"; then
+  chmod 0755 "$staged" || die 1 "cannot set 0755 on the staged copy of $name"
+  final="$vdir/$name"
+  [ ! -e "$final" ] || die 6 "unexpected existing file at $final"
+  mv -T -- "$staged" "$final" || die 1 "cannot finalize $final"
+  staged=""
+done
+
+sha_content="$(printf '%s  hongscanner\n%s  collector' \
+  "${bin_digest[0]}" "${bin_digest[1]}")"
+if ! printf '%s\n' "$sha_content" > "$vdir/SHA256"; then
   die 6 "cannot create $vdir/SHA256: the path already exists (a planted symlink is never followed or truncated); version $version is left incomplete and unselected"
 fi
 prov_content="$(
@@ -194,7 +234,8 @@ prov_content="$(
   printf 'source_digest=%s\n' "$source_digest"
   printf 'runner_policy=github-hosted-only (--deny-self-hosted-runners)\n'
   printf 'verifier=gh attestation verify (delegated, never reimplemented)\n'
-  printf 'sha256=%s\n' "$digest_verified"
+  printf 'sha256_hongscanner=%s\n' "${bin_digest[0]}"
+  printf 'sha256_collector=%s\n' "${bin_digest[1]}"
 )" || die 1 "cannot render the provenance record"
 if ! printf '%s\n' "$prov_content" > "$vdir/PROVENANCE.txt"; then
   die 6 "cannot create $vdir/PROVENANCE.txt: the path already exists (a planted symlink is never followed or truncated); version $version is left incomplete and unselected"
@@ -204,12 +245,15 @@ fi
 # $root/versions could have swapped the finalized version wholesale by now.
 sha_now="$(cat -- "$vdir/SHA256")" || true
 prov_now="$(cat -- "$vdir/PROVENANCE.txt")" || true
-if [ "$sha_now" != "$sha_line" ] || [ "$prov_now" != "$prov_content" ]; then
+if [ "$sha_now" != "$sha_content" ] || [ "$prov_now" != "$prov_content" ]; then
   die 5 "version $version metadata changed after being written (TOCTOU); it is left unselected"
 fi
-digest_final="$(sha256_of "$final")" || die 1 "cannot re-hash $final"
-[ "$digest_final" = "$digest_verified" ] || die 5 \
-  "installed binary changed before the current switch (TOCTOU): $digest_verified -> $digest_final; version $version is left unselected"
+for i in 0 1; do
+  final="$vdir/${bin_name[$i]}"
+  digest_final="$(sha256_of "$final")" || die 1 "cannot re-hash $final"
+  [ "$digest_final" = "${bin_digest[$i]}" ] || die 5 \
+    "installed ${bin_name[$i]} changed before the current switch (TOCTOU): ${bin_digest[$i]} -> $digest_final; version $version is left unselected"
+done
 
 if [ -e "$root/current" ] && [ ! -L "$root/current" ]; then
   die 6 "$root/current exists and is not a symlink; version $version was installed but left unselected"
@@ -224,5 +268,5 @@ tmplink=""
 
 printf 'INSTALL VERIFY OK repo=%s signer=%s ref=%s source_digest=%s runner=github-hosted-only\n' \
   "$REPO" "$SIGNER_WORKFLOW" "$SOURCE_REF" "$source_digest"
-printf 'INSTALL OK version=%s sha256=%s current=%s\n' \
-  "$version" "$digest_verified" "$root/current"
+printf 'INSTALL OK version=%s sha256_hongscanner=%s sha256_collector=%s current=%s\n' \
+  "$version" "${bin_digest[0]}" "${bin_digest[1]}" "$root/current"
