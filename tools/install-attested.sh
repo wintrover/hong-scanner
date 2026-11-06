@@ -39,11 +39,13 @@
 ##     refuses the install. Existing versions and any user data are never
 ##     deleted or overwritten; a failed install removes only its own
 ##     uniquely named temp files and leaves everything else exactly as is.
-##   - No lock file: a version directory is claimed with mkdir(1), so the
-##     loser of a same-version race fails with EEXIST, and `current` is
-##     replaced only by renaming a uniquely named temp symlink over it
-##     (mv -T). Concurrent installs therefore cannot interleave, and a
-##     reader always sees either the old or the new complete version.
+##   - No lock file: a version directory is claimed with mkdir(1), and
+##     each binary name inside it is claimed with ln(1) (hard link, fails
+##     with EEXIST on any collision), so the loser of a same-version race
+##     fails closed and can never overwrite the winner's finalized bytes.
+##     `current` is replaced only by renaming a uniquely named temp
+##     symlink over it (mv -T), so a reader always sees either the old
+##     or the new complete version.
 ##   - TOCTOU: each binary is hashed before verification, re-hashed after
 ##     it, the staged copy is hashed before being finalized, and the
 ##     finalized version is re-read (metadata re-compared, both binaries
@@ -201,7 +203,14 @@ mkdir -- "$vdir" \
 
 # Stage and finalize BOTH binaries inside the same version directory. A
 # failure here leaves the version incomplete and -- critically --
-# unselected (no `current` switch happens below).
+# unselected (no `current` switch happens below). Finalization is an
+# exclusive per-file claim: `ln` fails with EEXIST if the final name
+# already exists, so two racers sharing a version directory (observed on
+# CI runners, run 42174648801 attempt 3: both racers' logs show both
+# inside the staging loop, each overwriting the other's finalized
+# binaries through the check-then-rename window) can never interleave
+# their bytes -- the second claim loses with exit 6 and the version
+# keeps exactly one racer's pair.
 for i in 0 1; do
   bin="${bin_path[$i]}"
   name="${bin_name[$i]}"
@@ -217,7 +226,9 @@ for i in 0 1; do
   chmod 0755 "$staged" || die 1 "cannot set 0755 on the staged copy of $name"
   final="$vdir/$name"
   [ ! -e "$final" ] || die 6 "unexpected existing file at $final"
-  mv -T -- "$staged" "$final" || die 1 "cannot finalize $final"
+  ln -- "$staged" "$final" || die 6 \
+    "lost the per-file finalize race for $final; version $version is left incomplete and unselected"
+  rm -f -- "$staged" || die 1 "cannot remove the staging name of $name"
   staged=""
 done
 
