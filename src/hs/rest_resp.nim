@@ -1,19 +1,30 @@
 ## rest_resp: the validated acceptance path for rest_resp records
-## (docs/REPLAY_CONTRACT.md §12.1/§12.2, the VS-2 implementation choice that
-## replaces the VS-1 fail-closed rejection of every rest_resp).
+## (docs/REPLAY_CONTRACT.md §12.1/§12.2/§12.8, the VS-2 implementation choice
+## that replaces the VS-1 fail-closed rejection of every rest_resp).
 ##
 ## Pure: parses and validates the raw payload of one recorded REST attempt --
 ## the declared request scope, the page index, and the preserved original
 ## HTTP response metadata and body bytes -- and audits the declared page
 ## chains of a complete stream. No wall clock, no filesystem, no network.
 ##
+## Two declared APIs share this one record envelope (the acceptance set;
+## anything else is rejected): ka10027 (candidate selection, §12.1) and
+## ka10080 (3-minute backfill bars, §12.8). The envelope is identical for
+## both; only the declared query schema differs.
+##
 ## Record schema (module-internal contract; the record raw is one HCJ object
 ## with exactly these fields):
-##   api_id    string  response api-id; only ka10027 is declared (§12.1)
+##   api_id    string  response api-id; only ka10027 and ka10080 are declared
+##                     (§12.1/§12.8)
 ##   page      int     1-based page index inside this scope's page chain
-##   query     object  exactly the nine ka10027 request fields, all strings;
+##   query     object  ka10027: exactly the nine request fields, all strings;
 ##                     sort_tp restricted to "1"/"3" (one query per
-##                     direction) and stex_tp to "1" (KRX; §12.1)
+##                     direction) and stex_tp to "1" (KRX; §12.1).
+##                     ka10080: stk_cd, tic_scope (the declared 3-minute
+##                     scope "3"), upd_stkpc_tp (0|1), all strings, plus the
+##                     OPTIONAL base_dt (YYYYMMDD, absent = undeclared);
+##                     other tic_scope values are outside this
+##                     implementation's declared scope
 ##   status    int     HTTP transport status as recorded by the producer
 ##   cont_yn   string  "Y", "N" or "" (header absent)
 ##   next_key  string  continuation key, <= 50 chars, "" when none
@@ -60,11 +71,20 @@ type
     failure*: VendorFailure
     seqNo*: int   ## stream seq of the offending record (chain-level: first seq)
 
+  RestApi* = enum
+    ## The declared rest_resp acceptance set: which API a record's declared
+    ## scope belongs to. The scope object shape differs per API.
+    raKa10027    ## candidate selection (REPLAY_CONTRACT §12.1)
+    raKa10080    ## 3-minute backfill bars (REPLAY_CONTRACT §12.8)
+
   RestRespAttempt* = object
     ## One parsed rest_resp record: what was asked (declared scope + page
     ## index) and what came back (preserved response, byte-exact body).
+    ## Exactly one of scope/scope80 is meaningful, per api.
     seqNo*: int
-    scope*: Ka10027Query
+    api*: RestApi
+    scope*: Ka10027Query      ## valid when api == raKa10027
+    scope80*: Ka10080Query    ## valid when api == raKa10080
     page*: int
     resp*: RawHttpResp
     bodySha256*: string  ## sha256 over the decoded body bytes (audit print)
@@ -75,6 +95,15 @@ const
   queryFields* = [
     "crd_cnd", "mrkt_tp", "pric_cnd", "sort_tp", "stk_cnd", "stex_tp",
     "trde_prica_cnd", "trde_qty_cnd", "updown_incls"]
+  ka10080QueryFields* = [
+    "base_dt", "stk_cd", "tic_scope", "upd_stkpc_tp"]
+  ## The declared acceptance set of this record path.
+  restApiIds* = [ka10027ApiId, ka10080ApiId]
+  ## The implementation's declared chart scope: 3-minute bars only
+  ## (REPLAY_CONTRACT §12.8 "ka10080 (3-minute bars)"). Other documented
+  ## tic_scope values are valid vendor values but outside this
+  ## implementation's declared scope.
+  declaredTicScope* = "3"
 
 proc rerr(seqNo: int; f: VendorFailure; msg: string): ref RestRespError =
   let e = newException(RestRespError, msg)
@@ -192,13 +221,48 @@ proc parseScope(seqNo: int; qRaw: HcjValue): Ka10027Query =
     strField(seqNo, qRaw, "trde_prica_cnd", "declared query field"),
     stexTp)
 
+proc parseScope80(seqNo: int; qRaw: HcjValue): Ka10080Query =
+  ## The declared ka10080 chart scope: stk_cd, tic_scope and upd_stkpc_tp
+  ## are required strings; base_dt is the documented OPTIONAL field
+  ## (absent = undeclared, never defaulted). tic_scope is pinned to this
+  ## implementation's declared 3-minute scope — a different documented value
+  ## is outside the declared scope, fail-closed, never silently consumed.
+  for p in qRaw.pairs:
+    if not inArr(p.k, ka10080QueryFields):
+      raise rerr(seqNo, vfContract,
+                 "unknown declared ka10080 query field: " & p.k)
+    if p.v.kind != hkStr:
+      raise rerr(seqNo, vfContract,
+                 "declared ka10080 query field is not a string: " & p.k &
+                 " is " & kindName(p.v))
+  for k in ka10080QueryFields:
+    if k == "base_dt": continue   # optional: absent = undeclared
+    if not qRaw.has(k):
+      raise rerr(seqNo, vfContract,
+                 "missing declared ka10080 query field: " & k)
+  let ticScope = strField(seqNo, qRaw, "tic_scope", "declared query field")
+  if ticScope != declaredTicScope:
+    raise rerr(seqNo, vfContract,
+               "ka10080 tic_scope " & ticScope & " is outside this " &
+               "implementation's declared scope (3-minute bars, " &
+               "REPLAY_CONTRACT §12.8): a different documented value is a " &
+               "declared-scope mismatch, rejected fail-closed")
+  let baseDt = if qRaw.has("base_dt"):
+    strField(seqNo, qRaw, "base_dt", "declared query field") else: ""
+  initKa10080Query(
+    strField(seqNo, qRaw, "stk_cd", "declared query field"),
+    ticScope,
+    strField(seqNo, qRaw, "upd_stkpc_tp", "declared query field"),
+    baseDt)
+
 proc parseAttempt*(seqNo: int; raw: HcjValue): RestRespAttempt =
   ## Parse and validate one rest_resp record payload: schema, declared
-  ## request scope, page index, preserved response metadata and body bytes.
-  ## Record-level failures raise here, at the record's own seq. The body's
-  ## success affirmation and the chain-level rules (cont-yn repeat, page
-  ## cap, 1..N order) are stream properties: verifyAttempts applies them to
-  ## the complete record set and still rejects the whole stream.
+  ## request scope (ka10027 or ka10080, dispatched on the declared api_id),
+  ## page index, preserved response metadata and body bytes. Record-level
+  ## failures raise here, at the record's own seq. The body's success
+  ## affirmation and the chain-level rules (cont-yn repeat, page cap, 1..N
+  ## order) are stream properties: verifyAttempts applies them to the
+  ## complete record set and still rejects the whole stream.
   try:
     if raw.kind != hkObj:
       raise rerr(seqNo, vfContract,
@@ -209,23 +273,33 @@ proc parseAttempt*(seqNo: int; raw: HcjValue): RestRespAttempt =
                    "unknown rest_resp field: " & p.k & " (the record schema " &
                    "is exactly " & restRespFields.join(", ") & ")")
     let apiId = strField(seqNo, raw, "api_id", "rest_resp field")
-    if apiId != ka10027ApiId:
+    case apiId
+    of ka10027ApiId:
+      result.api = raKa10027
+      result.scope = parseScope(seqNo,
+        objField(seqNo, raw, "query", "rest_resp field"))
+    of ka10080ApiId:
+      result.api = raKa10080
+      result.scope80 = parseScope80(seqNo,
+        objField(seqNo, raw, "query", "rest_resp field"))
+    else:
       raise rerr(seqNo, vfContract,
                  "rest_resp api_id is outside the declared acceptance path " &
-                 "(only " & ka10027ApiId & " is declared, REPLAY_CONTRACT " &
-                 "§12.1): " & apiId)
+                 "(only " & restApiIds.join(" and ") & " are declared, " &
+                 "REPLAY_CONTRACT §12.1/§12.8): " & apiId)
     let page = intField(seqNo, raw, "page", "rest_resp field")
     if page < 1:
       raise rerr(seqNo, vfContract,
                  "rest_resp page index must be >= 1: " & $page)
-    let scope = parseScope(seqNo, objField(seqNo, raw, "query", "rest_resp field"))
     let status = intField(seqNo, raw, "status", "rest_resp field")
     let contYn = strField(seqNo, raw, "cont_yn", "rest_resp field")
     let nextKey = strField(seqNo, raw, "next_key", "rest_resp field")
     let body = bytesFromHex(strField(seqNo, raw, "body_hex", "rest_resp field"))
     let resp = httpResp(apiId, status, contYn, nextKey, body)
-    RestRespAttempt(seqNo: seqNo, scope: scope, page: page, resp: resp,
-                    bodySha256: sha256Hex(resp))
+    result.seqNo = seqNo
+    result.page = page
+    result.resp = resp
+    result.bodySha256 = sha256Hex(resp)
   except RestRespError as e:
     if e.seqNo == 0:
       raise rerr(seqNo, e.failure, e.msg)
@@ -237,28 +311,38 @@ proc parseAttempt*(seqNo: int; raw: HcjValue): RestRespAttempt =
 
 # ---------------------------------------------------------------- chain audit
 
+proc scopeKeyOf*(a: RestRespAttempt): string =
+  ## Canonical text of the declared request scope, dispatched on the
+  ## record's API: the page-chain grouping key (identical declared queries
+  ## share one chain; a ka10027 and a ka10080 scope never collide, and
+  ## neither do two ka10080 scopes of different symbols).
+  case a.api
+  of raKa10027: canonical(ka10027RequestBody(a.scope))
+  of raKa10080: canonical(ka10080RequestBody(a.scope80))
+
 proc scopeKey*(scope: Ka10027Query): string =
-  ## Canonical text of the declared request scope: the page-chain grouping
-  ## key (identical declared queries share one chain).
+  ## Canonical text of the declared ka10027 request scope.
   canonical(ka10027RequestBody(scope))
 
 proc verifyAttempts*(attempts: seq[RestRespAttempt];
                      pageCap: int = defaultPageCap;
                      pollSeconds: int = 0): seq[RestRespAttempt] =
   ## Audit the declared page chains of a complete stream and return the
-  ## verified attempts (confirmed success, in stream order). Any failure
-  ## raises; a partial result is never returned. Per declared scope, in
-  ## stream order: pages must run 1..N without gaps, duplicates or restarts,
-  ## and the whole chain must pass vendor_input.normalizeChain -- the same
-  ## success affirmation and cont-yn/page-cap rules as the vendor layer.
+  ## verified attempts (confirmed success, in stream order). Chains are
+  ## grouped per (api, declared scope): ka10027 and ka10080 chains are
+  ## audited independently of each other, each with the vendor_input rules
+  ## of its own spec. Any failure raises; a partial result is never
+  ## returned. Per declared scope, in stream order: pages must run 1..N
+  ## without gaps, duplicates or restarts, and the whole chain must pass
+  ## the vendor_input affirmation -- the same success and cont-yn/page-cap
+  ## rules as the vendor layer.
   ## A round that reaches the declared cap while cont-yn=Y is audited as a
   ## declared truncated subset (truncatedOk): the cap is a scanner-side
-  ## declaration, the pages beyond it are "not fetched", never "no more
-  ## candidates" (REPLAY_CONTRACT §12.1) -- its pages are verified
-  ## responses of a declared partial chain, the truncation fact is the
-  ## collector's gap record and the REST_TRUNCATED event. Below the cap
-  ## cont-yn=Y is still a REJECT: a missing continuation page is never
-  ## declared away.
+  ## declaration, the pages beyond it are "not fetched" (REPLAY_CONTRACT
+  ## §12.1/§12.8) -- its pages are verified responses of a declared partial
+  ## chain, the truncation fact is the collector's gap record and the
+  ## REST_TRUNCATED event. Below the cap cont-yn=Y is still a REJECT: a
+  ## missing continuation page is never declared away.
   ##
   ## pollSeconds is the config-declared re-poll cadence (README §6.1, the
   ## "approved extension path" rest_resp reserves). 0 (undeclared) keeps the
@@ -269,10 +353,10 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
   ## cont_yn, or the cap-closed truncated-subset rule above), so an
   ## unterminated below-cap re-poll chain is still never a success.
   if attempts.len == 0: return
-  var keys: seq[string]
+  var keys: seq[tuple[api: RestApi, key: string]]
   var groups: seq[seq[RestRespAttempt]]
   for a in attempts:
-    let k = scopeKey(a.scope)
+    let k = (a.api, scopeKeyOf(a))
     var gi = -1
     for i, x in keys:
       if x == k:
@@ -302,18 +386,29 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
                    "page index " & $a.page & " leaves a gap in the 1..N " &
                    "continuation (expected " & $(i + 1) & "); rejected " &
                    "fail-closed")
-    var pages: seq[RawHttpResp]
-    for a in g:
-      pages.add(a.resp)
-    let chain = PageChain(query: g[0].scope, pages: pages)
     let capClosed = g[^1].resp.contYn == "Y" and g.len >= pageCap
-    try:
-      discard normalizeChain(ka10027Spec, chain, pageCap, capClosed)
-    except VendorInputError as e:
-      raise rerr(g[0].seqNo, e.failure,
-                 "ka10027 page chain (sort_tp " &
-                 sortTpOf(g[0].scope.direction) & ", " & $g.len &
-                 " page(s)): " & e.msg)
+    case g[0].api
+    of raKa10027:
+      var pages: seq[RawHttpResp]
+      for a in g: pages.add(a.resp)
+      try:
+        discard normalizeChain(ka10027Spec,
+          PageChain(query: g[0].scope, pages: pages), pageCap, capClosed)
+      except VendorInputError as e:
+        raise rerr(g[0].seqNo, e.failure,
+                   "ka10027 page chain (sort_tp " &
+                   sortTpOf(g[0].scope.direction) & ", " & $g.len &
+                   " page(s)): " & e.msg)
+    of raKa10080:
+      var pages: seq[RawHttpResp]
+      for a in g: pages.add(a.resp)
+      try:
+        verifyKa10080Chain(Ka10080Chain(query: g[0].scope80, pages: pages),
+                           pageCap, capClosed)
+      except VendorInputError as e:
+        raise rerr(g[0].seqNo, e.failure,
+                   "ka10080 chart chain (stk_cd " & g[0].scope80.stkCd &
+                   ", " & $g.len & " page(s)): " & e.msg)
     for a in g:
       result.add(a)
   for g in groups:
@@ -338,3 +433,22 @@ proc verifyAttempts*(attempts: seq[RestRespAttempt];
         for a in auditChain(r):
           result.add(a)
   result.sort(proc (a, b: RestRespAttempt): int = cmp(a.seqNo, b.seqNo))
+
+proc ka10080Chains*(attempts: seq[RestRespAttempt]): seq[Ka10080Chain] =
+  ## The ka10080 attempts of a stream, assembled into per-scope chains in
+  ## first-appearance scope order (pages in recorded page order) — the
+  ## backfill bar derivation input. The attempts are expected to be the
+  ## verified set of verifyAttempts (each chain already audited); the bar
+  ## derivation re-parses the preserved rows from the body bytes itself.
+  for a in attempts:
+    if a.api != raKa10080: continue
+    let key = scopeKeyOf(a)
+    var idx = -1
+    for i, c in result:
+      if canonical(ka10080RequestBody(c.query)) == key:
+        idx = i
+        break
+    if idx < 0:
+      result.add(Ka10080Chain(query: a.scope80, pages: @[a.resp]))
+    else:
+      result[idx].pages.add(a.resp)

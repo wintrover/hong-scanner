@@ -454,10 +454,16 @@ proc restEvents(s: var EventGenState; r: Record; events: var seq[EventFact]) =
   ## later page must continue the scope's newest round at exactly the
   ## next page index; anything else is chain corruption the audit
   ## rejects, so it judges nothing.
+  ##
+  ## ka10080 records judge nothing here: candidate facts are ka10027
+  ## chains only (§13 rule table), and the backfill bars carry no event
+  ## rule — the record stays preserved evidence.
   var a: RestRespAttempt
   try:
     a = parseAttempt(r.seq, r.raw)
   except RestRespError:
+    return
+  if a.api != raKa10027:
     return
   let key = scopeKey(a.scope)
   var idx = -1

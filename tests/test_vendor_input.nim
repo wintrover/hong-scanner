@@ -299,8 +299,9 @@ block pagination:
 
 block subsetSemantics:
   check("ka10027 is declared paginated", ka10027Spec.paginated)
-  check("the explicit paginated subset is exactly ka10027",
-        paginatedTrs.len == 1 and paginatedTrs[0] == "ka10027")
+  check("the explicit paginated subset is exactly ka10027 and ka10080",
+        paginatedTrs.len == 2 and paginatedTrs[0] == "ka10027" and
+        paginatedTrs[1] == "ka10080")
   let nonPaginated = TrSpec(apiId: "ka10027", path: ka10027Path,
                             paginated: false, listKey: ka10027ListKey,
                             rowFields: @ka10027RowFields)

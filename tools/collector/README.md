@@ -18,7 +18,7 @@ collector-core(`src/hs/collector.nim`)는 이 문서의 필드·순서·오류 �
 ```
 Python sidecar (tools/collector/sidecar.py, Python 3.13 격리 venv)
   통신 전용 — 해석·기록·판정 권한 없음:
-    REST ka10027 (원문 body bytes), WS 단일 영속 연결(demo),
+    REST ka10027/ka10080 (원문 body bytes), WS 단일 영속 연결(demo),
     recv(decode=False) 원문 bytes, PING 최소 판별 후 원문 echo,
     클라이언트발 프로토콜 ping 차단(ping_interval=None),
     타이머 소유(재조회 300s·watchdog 15:40·drain 10s·quiet 10s),
@@ -35,6 +35,8 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
 
 - sidecar는 시장 데이터를 **해석하지 않는다**: 채널 판별(REG/REAL/0B/0s/…), 
   REG/REMOVE ack 짝짓기, 후보 도출, 종료 판정은 전부 Nim core가 한다.
+  ka10080(주식분봉차트, 백필)도 같다: sidecar는 원문 응답만 전달하고(§2.7),
+  봉 파싱·origin 표시·연속조회 판단은 전부 core의 몫이다.
 - sidecar가 예외적으로 판별하는 것은 통신 계층의 세 가지뿐이다(§4): 
   Kiwoom PING(echo), LOGIN(접속 인증 수명), 그리고 토큰 만료(갱신).
 - core는 시계가 없다: 기록되는 모든 `t`는 sidecar가 이벤트에 찍은 시각이거나,
@@ -181,6 +183,30 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
   stop 이전에 파이프가 깨지면(BrokenPipe) sidecar는 exit 4로 죽는다
   (core가 먼저 죽은 비정상 상황).
 
+### 2.7 `chart_req` — REST ka10080 1페이지 (주식분봉차트, 백필)
+
+```json
+{"type":"chart_req","api_id":"ka10080","page":1,
+ "params":{"stk_cd":"005930","tic_scope":"3","upd_stkpc_tp":"0"},
+ "cont_yn":"","next_key":""}
+```
+
+- 공식 문서(2026-11-06 수집): `POST /api/dostk/chart`, 본문
+  `stk_cd`·`tic_scope`("1:1분, 3:3분, 5, 10, 15, 30, 45, 60")·`upd_stkpc_tp`
+  (0|1), `base_dt`(선택, YYYYMMDD — 비었거나 없으면 본문에서 생략).
+  연속조회는 `rest_req`와 같은 cont-yn/next-key 헤더 쌍이다.
+- `api_id`는 `"ka10080"`으로 고정된다(이 호출의 승인 api-id). 다른 값은
+  명령 거부(exit 4)다. `params`의 세 필수 필드는 비지 않은 문자열,
+  `base_dt`는 선택 문자열 — sidecar는 **송신 형상만** 검증하고, 스코프의
+  값 권위(공식 enum·선언된 3분 스코프 고정)는 core의 vendor_input 검증이
+  담당한다. 본문은 선언된 params를 **그대로** 송신한다.
+- 응답은 `rest_chart` 이벤트(§3.7)로 원문 보고한다. HTTP 전송 실패는
+  `error what=rest`로 보고한다(`rest_req`와 동일한 계약).
+- 페이지 반복 판단(cont-yn/next-key)은 **core**가 한다. **REST 송신
+  간격**: §2.4의 1.5초 간격이 모든 REST 트래픽(rkinfo·chart 공통)에
+  같은 잠금으로 적용된다 — 벤더의 TR 1초 1회 한도는 API 호출 전체에
+  걸린 제한이다.
+
 ## 3. sidecar → core 이벤트
 
 모든 이벤트는 `"ev"`와 `"t"`(ISO 8601, 숫자 오프셋, KST +09:00 —
@@ -259,6 +285,24 @@ sidecar 소유 시계)를 가진다.
   오류로 분류한다(§7).
 - `what=internal`: sidecar 내부 결함. core는 세션을 즉시 비정상 종료한다
   (INCOMPLETE 경로, §8). sidecar 자신도 같은 결함으로 exit 4.
+
+### 3.7 `rest_chart` — ka10080 REST 응답 (원문)
+
+```json
+{"ev":"rest_chart","api_id":"ka10080","page":1,"status":200,
+ "cont_yn":"N","next_key":"","body_hex":"7b0a...","t":"..."}
+```
+
+- `rest_req`의 `rest` 이벤트(§3.5)와 같은 원문 보고 계약: `status`·
+  `cont_yn`/`next_key`(헤더 원문, 없으면 "")·`body_hex`(원문 bytes 소문자
+  hex). 요청 파라미터는 이벤트에 반복되지 않는다 — 선언 스코프는 core가
+  지시한 `chart_req`가 이미 갖고 있고, 기록되는 rest_resp 레코드가 그
+  선언을 담는다(REPLAY_CONTRACT §12.2/§12.8).
+- core는 이것을 ka10080 rest_resp 레코드로 기록하고(선언 스코프+page+
+  status+cont_yn+next_key+body_hex), vendor_input 규칙으로 성립을 검증한
+  뒤 체인을 조립한다. 백필 봉은 그 검증된 원문에서만 파생되며
+  `origin:"BACKFILL"`로 표시된다 — 실시간 틱으로 위장한 입력 경로는
+  존재하지 않는다(§12.8).
 
 ## 4. sidecar의 최소 판별 (전부 — 이것 밖에 없다)
 

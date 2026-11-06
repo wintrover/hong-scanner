@@ -259,6 +259,30 @@ block rederive:
         back.bodySha256 == a.bodySha256 and back.page == 1 and
         sameQuery(back.scope, a.scope))
 
+# ---------------------------------------------------- ka10080 acceptance
+
+block ka10080Acceptance:
+  ## The acceptance set now declares two APIs (§12.1 ka10027, §12.8
+  ## ka10080): a ka10080 record with its own declared chart scope parses
+  ## through the same envelope. The full ka10080 contract (scope schema,
+  ## chains, BACKFILL bars) lives in test_backfill_contract.nim; this block
+  ## pins the acceptance flip at the record layer.
+  let body80 = canonical(hObj((ka10080ListKey, hArr()), ("return_code", hInt(0))))
+  let a = parseAttempt(3, hObj(
+    ("api_id", hStr(ka10080ApiId)), ("body_hex", hStr(hexOf(body80))),
+    ("cont_yn", hStr("N")), ("next_key", hStr("")), ("page", hInt(1)),
+    ("query", hObj(("stk_cd", hStr("005930")), ("tic_scope", hStr("3")),
+                   ("upd_stkpc_tp", hStr("0")))),
+    ("status", hInt(200))))
+  check("ka10080: a chart record is accepted through the same envelope",
+        a.api == raKa10080 and a.page == 1 and a.resp.status == 200 and
+        a.bodySha256 == sha256Hex(toBytes(body80)))
+  check("ka10080: a single-page chart chain verifies",
+        verifyAttempts(@[a]).len == 1)
+  check("ka10080: a page of one stream mixes with the ka10027 chains",
+        verifyAttempts(@[a, parseAttempt(4, attemptRaw(
+          okBody(@[row("005930", "삼성전자", "71500", "5.10")])))]).len == 2)
+
 # ---------------------------------------------------------------- schema
 
 block failureSchema:
@@ -297,7 +321,7 @@ block failureSchema:
            "outside the declared acceptance path",
            proc () =
              let r = attemptRaw(body)
-             setType(r, "api_id", hStr("ka10080"))
+             setType(r, "api_id", hStr("ka11080"))
              discard parseAttempt(3, r))
   restUnit("schema: sort_tp 2 is not a candidate direction", vfContract,
            "not a candidate direction",
