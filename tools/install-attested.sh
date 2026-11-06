@@ -221,22 +221,20 @@ for i in 0 1; do
   staged=""
 done
 
-sha_content="$(printf '%s  hongscanner\n%s  collector' \
-  "${bin_digest[0]}" "${bin_digest[1]}")"
+# Rendered with shell builtins only: zero forks between winning the race
+# (both final `mv`s above) and the durable SHA256 record, so a transient
+# fork failure under runner resource exhaustion cannot kill the winner
+# after it has finalized the binary pair.
+printf -v sha_content '%s  hongscanner\n%s  collector' \
+  "${bin_digest[0]}" "${bin_digest[1]}"
 if ! printf '%s\n' "$sha_content" > "$vdir/SHA256"; then
   die 6 "cannot create $vdir/SHA256: the path already exists (a planted symlink is never followed or truncated); version $version is left incomplete and unselected"
 fi
-prov_content="$(
-  printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'repo=%s\n' "$REPO"
-  printf 'signer_workflow=%s\n' "$SIGNER_WORKFLOW"
-  printf 'source_ref=%s\n' "$SOURCE_REF"
-  printf 'source_digest=%s\n' "$source_digest"
-  printf 'runner_policy=github-hosted-only (--deny-self-hosted-runners)\n'
-  printf 'verifier=gh attestation verify (delegated, never reimplemented)\n'
-  printf 'sha256_hongscanner=%s\n' "${bin_digest[0]}"
-  printf 'sha256_collector=%s\n' "${bin_digest[1]}"
-)" || die 1 "cannot render the provenance record"
+TZ=UTC printf -v installed_utc '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+printf -v prov_content \
+  'installed_utc=%s\nrepo=%s\nsigner_workflow=%s\nsource_ref=%s\nsource_digest=%s\nrunner_policy=github-hosted-only (--deny-self-hosted-runners)\nverifier=gh attestation verify (delegated, never reimplemented)\nsha256_hongscanner=%s\nsha256_collector=%s' \
+  "$installed_utc" "$REPO" "$SIGNER_WORKFLOW" "$SOURCE_REF" "$source_digest" \
+  "${bin_digest[0]}" "${bin_digest[1]}"
 if ! printf '%s\n' "$prov_content" > "$vdir/PROVENANCE.txt"; then
   die 6 "cannot create $vdir/PROVENANCE.txt: the path already exists (a planted symlink is never followed or truncated); version $version is left incomplete and unselected"
 fi
