@@ -137,6 +137,51 @@ void main() {
     expect(find.textContaining('(rank'), findsNothing);
   });
 
+  testWidgets('timeline rows show recorded session_id and data_quality',
+      (WidgetTester tester) async {
+    final store = makeStore(transport: fixtureTransport());
+    await store.bootstrap();
+    await pumpTallApp(tester, store);
+
+    await tester.tap(find.text('Timeline'));
+    await tester.pumpAndSettle();
+
+    // Each row shows the fact's recorded provenance fields verbatim:
+    // session_id on all four rows, OBSERVING on the three candidate
+    // facts, INCOMPLETE on the session-end fact.
+    expect(find.textContaining('session_id: 2026-11-02'), findsNWidgets(4));
+    expect(find.textContaining('data_quality: OBSERVING'), findsNWidgets(3));
+    expect(find.textContaining('data_quality: INCOMPLETE'), findsOneWidget);
+  });
+
+  testWidgets('timeline rows keep honest ? for absent provenance fields',
+      (WidgetTester tester) async {
+    final store = makeStore(transport: fixtureTransport(extra: {
+      '/events': okJson({
+        'count': 1,
+        'delivery': null,
+        'events': [
+          <String, Object?>{
+            ...evUpEnter,
+            'data_quality': null,
+            'session_id': null,
+          }
+        ],
+        'ledger_present': true,
+      }),
+    }));
+    await store.bootstrap();
+    await pumpTallApp(tester, store);
+
+    await tester.tap(find.text('Timeline'));
+    await tester.pumpAndSettle();
+
+    // Absence renders as '?' like the row's other optional fields —
+    // never as an invented value.
+    expect(find.textContaining('session_id: ?'), findsOneWidget);
+    expect(find.textContaining('data_quality: ?'), findsOneWidget);
+  });
+
   testWidgets('offline server surfaces an honest offline state with retry',
       (WidgetTester tester) async {
     final store = makeStore(
