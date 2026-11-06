@@ -286,12 +286,28 @@ with open(sys.argv[2], "w", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 
-# The environment field is validated at replay: only "demo"/"prod".
+# "prod" is a retired environment name: it is rejected exactly like any
+# other unknown value — never aliased to "real".
+python3 - "$REPO_ROOT/fixtures/smoke/input.hcj.jsonl" "$WORK/envprod.hcj.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    records = [json.loads(line) for line in f]
+records[1]["raw"]["environment"] = "prod"
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    for seq, record in enumerate(records, 1):
+        record["seq"] = seq
+        f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+# The environment field is validated at replay: only "demo"/"real".
 RC=0; (cd "$WORK" && "$BIN" replay --in envstream.hcj.jsonl --out runs/envbase >/dev/null 2>&1) || RC=$?
 assert_eq "replay accepts an environment-declaring stream" 0 "$RC"
 RC=0; ERR="$(cd "$WORK" && "$BIN" replay --in envbad.hcj.jsonl --out runs/envbad 2>&1)" || RC=$?
 assert_eq "replay rejects an invalid environment with exit 2" 2 "$RC"
-assert_contains "the rejection names config.environment" "$ERR" "config.environment is not demo|prod"
+assert_contains "the rejection names config.environment" "$ERR" "config.environment is not demo|real"
+RC=0; ERR="$(cd "$WORK" && "$BIN" replay --in envprod.hcj.jsonl --out runs/envprod 2>&1)" || RC=$?
+assert_eq "replay rejects the retired prod name with exit 2" 2 "$RC"
+assert_contains "the prod rejection names demo|real" "$ERR" "config.environment is not demo|real: prod"
 
 write_marker() { # $1 = run dir whose input artifact the marker pins
   python3 - "$1" <<'PY'

@@ -20,8 +20,11 @@ The three discriminations this process does make (README §4, all of them):
      600 s buffer. Credentials come from `kiwoomcli auth refresh --profile
      <alias>` (token_source "kiwoomcli", the default), or — when the init
      line carries token_source "env" (README §5.1) — from a direct OAuth
-     issuance with APP_KEY_MOCK/APP_SECRET_MOCK. Token values and
-     credential values exist only in process memory: nothing prints them.
+     issuance with the environment's own credential variables:
+     APP_KEY_MOCK/APP_SECRET_MOCK for the demo environment,
+     APP_KEY_REAL/APP_SECRET_REAL for the real environment — never one
+     for the other. Token values and credential values exist only in
+     process memory: nothing prints them.
 
 Wire discipline (README §1): line-delimited UTF-8 JSON over stdin/stdout,
 one object per line. Every emitted line is HCJ-safe (string/int values
@@ -48,9 +51,58 @@ PROTOCOL = 1
 KST = timezone(timedelta(hours=9))
 DEMO_REST_DOMAIN = "https://mockapi.kiwoom.com"
 DEMO_WS_ENDPOINT = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+# The operational (real) split (official server-split document,
+# ASSUMPTIONS "Vendor facts"): 운영 https://api.kiwoom.com / 모의
+# https://mockapi.kiwoom.com; WS wss://api.kiwoom.com:10000 /
+# wss://mockapi.kiwoom.com:10000 — same port, same official WS API path.
+REAL_REST_DOMAIN = "https://api.kiwoom.com"
+REAL_WS_ENDPOINT = "wss://api.kiwoom.com:10000/api/dostk/websocket"
+# The only two environment names. "prod" is a retired name: nothing
+# accepts it anywhere.
+ENVIRONMENTS = ("demo", "real")
+
+
+def environment_rest_domain(environment):
+    """The REST domain derived from the environment. The live value is
+    pinned per environment; there is no caller-supplied domain and no
+    cross-environment fallback — an unknown name is a refusal."""
+    if environment == "demo":
+        return DEMO_REST_DOMAIN
+    if environment == "real":
+        return REAL_REST_DOMAIN
+    raise SidecarExit(4, "environment must be demo or real: %r"
+                      % (environment,))
+
+
+def environment_ws_endpoint(environment):
+    """The WS endpoint derived from the environment: the official base
+    (mock or operational) plus the official WS API path
+    /api/dostk/websocket — the same composition rule for both."""
+    if environment == "demo":
+        return DEMO_WS_ENDPOINT
+    if environment == "real":
+        return REAL_WS_ENDPOINT
+    raise SidecarExit(4, "environment must be demo or real: %r"
+                      % (environment,))
+
+
+def env_credential_names(environment):
+    """The OAuth env-variable pair for the environment (README §5.1):
+    demo reads APP_KEY_MOCK/APP_SECRET_MOCK, real reads
+    APP_KEY_REAL/APP_SECRET_REAL. The two pairs are separate by design
+    ("키움증권은 실제 투자와 모의투자 App Key를 별도로 관리합니다.") and are
+    never substituted for one another."""
+    if environment == "demo":
+        return ("APP_KEY_MOCK", "APP_SECRET_MOCK")
+    if environment == "real":
+        return ("APP_KEY_REAL", "APP_SECRET_REAL")
+    raise SidecarExit(4, "environment must be demo or real: %r"
+                      % (environment,))
+
+
 # The official OAuth issuance path (README §5.1). Only the env token
-# source uses it; the endpoint is derived from the pinned demo domain —
-# never from the wire.
+# source uses it; the endpoint is derived from the environment's pinned
+# domain — never from the wire.
 OAUTH_TOKEN_PATH = "/oauth2/token"
 REST_PATH = "/api/dostk/rkinfo"
 # ka10080 주식분봉차트조회 (official document, 2026-11-06): one chart page
@@ -136,7 +188,9 @@ def parse_init(line):
     """Validate the `init` instruction (README §2.1). Every field is
     required except the optional token_source (README §5.1); the approved
     PH-1 values are pinned here too — this sidecar refuses to run a
-    configuration the contract does not approve."""
+    configuration the contract does not approve. The environment is
+    "demo" or "real" and every endpoint must match that environment's
+    pinned value: a cross-environment mix is refused, never run."""
     try:
         cfg = json.loads(line)
     except ValueError:
@@ -145,12 +199,18 @@ def parse_init(line):
         raise SidecarExit(4, "init line is not a JSON object")
     if cfg.get("protocol") != PROTOCOL:
         raise SidecarExit(4, "init protocol must be 1")
-    if cfg.get("environment") != "demo":
-        raise SidecarExit(4, "this slice runs the demo environment only")
-    if cfg.get("rest_domain") != DEMO_REST_DOMAIN:
-        raise SidecarExit(4, "rest_domain is not the official demo domain")
-    if cfg.get("ws_endpoint") != DEMO_WS_ENDPOINT:
-        raise SidecarExit(4, "ws_endpoint is not the official demo endpoint")
+    environment = cfg.get("environment")
+    if environment not in ENVIRONMENTS:
+        # Fail-closed: an unknown name (including the retired "prod") is
+        # never defaulted to another environment.
+        raise SidecarExit(4, "init environment must be demo or real: %r"
+                          % (environment,))
+    if cfg.get("rest_domain") != environment_rest_domain(environment):
+        raise SidecarExit(4, "rest_domain is not the official %s domain"
+                          % environment)
+    if cfg.get("ws_endpoint") != environment_ws_endpoint(environment):
+        raise SidecarExit(4, "ws_endpoint is not the official %s endpoint"
+                          % environment)
     if cfg.get("api_id") != "ka10027":
         raise SidecarExit(4, "api_id must be ka10027")
     for key, want in [("page_cap", 10), ("repoll_seconds", 300),
@@ -250,9 +310,13 @@ class TokenStore:
 
 
 class EnvTokenProvider:
-    """The env credential path (README §5.1, token_source="env"): read
-    APP_KEY_MOCK / APP_SECRET_MOCK from the process environment and POST
-    the official OAuth client_credentials request directly. The response's
+    """The env credential path (README §5.1, token_source="env"): read the
+    environment's credential pair — APP_KEY_MOCK/APP_SECRET_MOCK for a
+    demo session, APP_KEY_REAL/APP_SECRET_REAL for a real session — from
+    the process environment and POST the official OAuth
+    client_credentials request directly. The pairs are separate by
+    design: a real session never falls back to the demo variables, and
+    vice versa. The response's
     expires_dt ("YYYYMMDDHHMMSS", KST absolute) is the only expiry
     evidence — no fixed validity period is documented. The token lives in
     this process's memory: no log, no stderr, no record, no file, no exit
@@ -261,12 +325,16 @@ class EnvTokenProvider:
 
     The endpoint is a constructor parameter so the contract tests can
     point it at a local fake server; the live sidecar derives it from the
-    pinned demo domain. The init-line rest_domain guard in parse_init is
-    never relaxed by this path.
+    environment's pinned domain. The init-line rest_domain guard in
+    parse_init is never relaxed by this path.
     """
 
-    def __init__(self, endpoint, clock=time.time, timeout=30,
-                 max_attempts=2):
+    def __init__(self, endpoint, environment="demo", clock=time.time,
+                 timeout=30, max_attempts=2):
+        if environment not in ENVIRONMENTS:
+            raise ValueError(
+                "environment must be demo or real: %r" % (environment,))
+        self.environment = environment
         self.endpoint = endpoint
         self.clock = clock
         self.timeout = timeout
@@ -280,15 +348,17 @@ class EnvTokenProvider:
         self._expires_epoch = 0.0
 
     def _credentials(self):
-        """The env credentials. Missing or empty is a refusal that names
-        the variable — there is no value to name and none is printed."""
-        appkey = os.environ.get("APP_KEY_MOCK", "")
-        secretkey = os.environ.get("APP_SECRET_MOCK", "")
+        """The env credentials of THIS session's environment. Missing or
+        empty is a refusal that names the variable — there is no value to
+        name and none is printed, and the other environment's variables
+        are never substituted."""
+        key_name, secret_name = env_credential_names(self.environment)
+        appkey = os.environ.get(key_name, "")
+        secretkey = os.environ.get(secret_name, "")
         if not appkey:
-            raise TokenError("APP_KEY_MOCK missing or empty in environment")
+            raise TokenError(key_name + " missing or empty in environment")
         if not secretkey:
-            raise TokenError(
-                "APP_SECRET_MOCK missing or empty in environment")
+            raise TokenError(secret_name + " missing or empty in environment")
         return appkey, secretkey
 
     def _issue(self):
@@ -385,6 +455,7 @@ class Sidecar:
     def __init__(self, cfg, repoll=300, drain=10, ack_timeout=10,
                  rest_min_interval=1.5, token_endpoint=None):
         self.cfg = cfg
+        self.environment = cfg["environment"]
         self.ws_endpoint = cfg["ws_endpoint"]
         self.rest_domain = cfg["rest_domain"]
         self.api_id = cfg["api_id"]
@@ -392,12 +463,13 @@ class Sidecar:
         source = cfg.get("token_source", "kiwoomcli")
         if source == "env":
             # README §5.1: the env path derives its endpoint from the
-            # pinned demo domain in production; the constructor parameter
-            # exists only so the contract tests can point it at a local
-            # fake server. The init-line rest_domain guard in parse_init
-            # is never relaxed by this path.
+            # environment's pinned domain in production; the constructor
+            # parameter exists only so the contract tests can point it at
+            # a local fake server. The init-line rest_domain guard in
+            # parse_init is never relaxed by this path.
             self.store = EnvTokenProvider(
-                token_endpoint or DEMO_REST_DOMAIN + OAUTH_TOKEN_PATH)
+                token_endpoint or environment_rest_domain(self.environment)
+                + OAUTH_TOKEN_PATH, environment=self.environment)
         else:
             self.store = TokenStore(cfg["profile"])
         # Durations are constructor parameters so the contract tests can

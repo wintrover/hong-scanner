@@ -9,7 +9,7 @@ type
   Config* = object
     sessionDate*: string
     params*: Params
-    ## Optional declared operating environment ("demo"|"prod"; "" when the
+    ## Optional declared operating environment ("demo"|"real"; "" when the
     ## stream declares none). The marker-aware verify rules key on this
     ## field; a present-but-invalid value is a parse failure (fail-closed).
     environment*: string
@@ -82,17 +82,19 @@ proc parseConfig*(raw: HcjValue): Config =
   result.sessionDate = raw.get("session_date").asStr
   # environment is optional (absent = the stream declares no operating
   # environment; every existing synthetic stream stays valid). Present,
-  # it is fail-closed: only the string "demo" or "prod" is accepted --
+  # it is fail-closed: only the string "demo" or "real" is accepted --
   # another value or a non-string type is a contract violation, never a
-  # default. The verify commit-marker rules key on this field.
+  # default. The verify commit-marker rules key on this field. ("prod" is
+  # a retired name: it was never produced by a sealed run, and the
+  # environment naming is unified on demo|real.)
   if raw.has("environment"):
     let e = raw.get("environment")
     if e.kind != hkStr:
       raise newException(RecordError,
         "config.environment is not a string: " & kindName(e))
-    if e.strVal != "demo" and e.strVal != "prod":
+    if e.strVal != "demo" and e.strVal != "real":
       raise newException(RecordError,
-        "config.environment is not demo|prod: " & e.strVal)
+        "config.environment is not demo|real: " & e.strVal)
     result.environment = e.strVal
   # The declared re-poll cadence and page cap (tools/collector/README.md
   # §6.1): both optional, both fail-closed on a wrong type or a

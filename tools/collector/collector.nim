@@ -16,16 +16,18 @@
 ##      becomes success).
 ##
 ## Usage: collector --profile <alias> --session-date YYYY-MM-DD --out <dir>
-##                [--calendar=<path>] [--token-source=kiwoomcli]
+##                --calendar=<path> [--environment=demo]
+##                [--token-source=kiwoomcli]
 ##                [--mrkt-tp=000] ... (declared query
 ##                scope, approved PH-1 values by default).
 import std/[os, osproc, strutils, posix, times, streams]
 import hs/[hcj, records, calendars, engine, collector, recorder, event_gen]
 
-const usageText = """collector — the VS-2 live collector (demo, PH-1)
+const usageText = """collector — the VS-2 live collector (demo|real)
 
   collector --profile <alias> --session-date YYYY-MM-DD --out <dir>
             --calendar=<path>
+            [--environment=demo]
             [--token-source=kiwoomcli]
             [--mrkt-tp=000 --trde-qty-cnd=0000 --stk-cnd=0 --crd-cnd=0
              --updown-incls=1 --pric-cnd=0 --trde-prica-cnd=0 --stex-tp=1]
@@ -33,10 +35,20 @@ const usageText = """collector — the VS-2 live collector (demo, PH-1)
              --countermove-min-bp=50 --directional-trigger-bp=30
              --hold-on-degraded=1]
 
+--environment selects the operating environment: "demo" (default, the
+mock servers) or "real" (the operational servers). Every domain — REST,
+WS, the OAuth token endpoint — is derived from this one selection; there
+is no cross-environment mix and no fallback: an unknown value is
+refused. Any other name (including "prod") is refused.
+
 --token-source names the sidecar credential path carried in the init
 line: "kiwoomcli" (default — the native client's token cache) or "env"
-(direct OAuth issuance from APP_KEY_MOCK/APP_SECRET_MOCK, README §5.1 —
-the cloud container path). Any other value is refused.
+(direct OAuth issuance from the environment-selected credential
+variables — APP_KEY_MOCK/APP_SECRET_MOCK for demo,
+APP_KEY_REAL/APP_SECRET_REAL for real; README §5.1 — the cloud
+container path). Any other value is refused. The env path never
+substitutes one environment's credentials for the other: a real session
+refuses to start on demo variables, and vice versa.
 
 Exit codes: 0 normal, 2 usage/contract, 4 INCOMPLETE (unsealed, preserved).
 """
@@ -50,6 +62,15 @@ proc argValue(args: seq[string]; name: string): string =
     if a.startsWith("--" & name & "="):
       return a[("--" & name & "=").len .. ^1]
   ""
+
+proc hasArgValue(args: seq[string]; name: string): bool =
+  ## Whether the flag was passed at all — an explicitly empty value is
+  ## distinct from an absent flag: the absent flag takes the declared
+  ## default, the empty value is a refusal, never a silent default.
+  for a in args:
+    if a.startsWith("--" & name & "="):
+      return true
+  false
 
 proc defaultStr(v, d: string): string =
   if v.len == 0: d else: v
@@ -216,11 +237,19 @@ proc main(): int =
   let sessionDate = argValue(args, "session-date")
   let outDir = argValue(args, "out")
   let calendarPath = argValue(args, "calendar")
+  let environment = if hasArgValue(args, "environment"):
+                      argValue(args, "environment")
+                    else:
+                      "demo"
   let tokenSource = argValue(args, "token-source").defaultStr("kiwoomcli")
   if profile.len == 0 or sessionDate.len == 0 or outDir.len == 0:
     fail(2, "collector requires --profile, --session-date and --out")
   if calendarPath.len == 0:
     fail(2, "collector requires --calendar (the approved snapshot)")
+  if environment != "demo" and environment != "real":
+    fail(2, "collector: --environment must be demo or real (got: " &
+                environment & "; there is no fallback to another " &
+                "environment)")
   if tokenSource != "kiwoomcli" and tokenSource != "env":
     fail(2, "collector: --token-source must be kiwoomcli or env")
   # createDir is pure creation: it never destroys an existing directory's
@@ -235,7 +264,7 @@ proc main(): int =
   var cfg: CollectorConfig
   try:
     cfg = initCollectorConfig(
-      sessionDate, "demo", profile,
+      sessionDate, environment, profile,
       argValue(args, "mrkt-tp").defaultStr("000"),
       argValue(args, "trde-qty-cnd").defaultStr("0000"),
       argValue(args, "stk-cnd").defaultStr("0"),
