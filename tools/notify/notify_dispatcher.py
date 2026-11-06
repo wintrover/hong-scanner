@@ -55,7 +55,9 @@ Retry classes (vendor table, tools/notify/README.md §5):
   the one-shot sweep retries in-sweep while the wait is within
   backoff_cap_seconds and parks PENDING otherwise (external scheduler
   resumes); the resident watch defers the pair and keeps serving;
-  404 UNREGISTERED -> FAILED, token retired in the registry, no retry;
+  404 UNREGISTERED (the REST wire spells it NOT_FOUND — google.rpc
+  canonical name for 404; classify_send retires on either) -> FAILED,
+  token retired in the registry, no retry;
   403 SENDER_ID_MISMATCH -> FAILED (config error, fail-closed, no
   retry), the sweep keeps serving the other devices and the process
   exits 3 — a config error is never a clean success;

@@ -9,7 +9,7 @@
 ##     urllib.request.urlopen ONLY while HSDRILL=1 (stdlib urllib cannot
 ##     be shadowed via PYTHONPATH; inert everywhere else). It enforces
 ##     the official endpoint shape, scripts per-device responses
-##     (200 / 429+Retry-After / 404 UNREGISTERED / 403
+##     (200 / 429+Retry-After / 404 NOT_FOUND+UNREGISTERED / 403
 ##     SENDER_ID_MISMATCH), and logs token HASHES only;
 ##   - fakebin/fcm-token-cmd = the platform-delegation token command
 ##     (the collector's fake kiwoomcli precedent);
@@ -26,8 +26,12 @@
 ##      (the device may have received the push twice — that is FCM
 ##      reality, honestly recorded, and the app dedups by event_id);
 ##   C  per-device error table: 429 with Retry-After honored in-sweep
-##      (>=1s gap), 404 UNREGISTERED retires the token (registry
-##      token_invalid, no further sends), 403 SENDER_ID_MISMATCH
+##      (>=1s gap), 404 retires the token under BOTH wire spellings —
+##      NOT_FOUND (the measured 2026-11-03 REST wire form for an
+##      invalid token: google.rpc canonical code name for HTTP 404)
+##      and UNREGISTERED (the Admin-SDK error table's name) — one
+##      device each, registry token_invalid, no further sends; 403
+##      SENDER_ID_MISMATCH
 ##      fails closed (FAILED record, other devices still served, exit
 ##      3 — a config error is never a clean success); a rerun sends
 ##      nothing (terminal states stay terminal);
@@ -358,13 +362,15 @@ ingest_source "$SB_C" "$SRC_C"
 seed_device "$SB_C" "dev-ok"  "FAKE-FCM-TOKEN-OK"
 seed_device "$SB_C" "dev-429" "FAKE-FCM-TOKEN-429"
 seed_device "$SB_C" "dev-404" "FAKE-FCM-TOKEN-404"
+seed_device "$SB_C" "dev-404u" "FAKE-FCM-TOKEN-404U"
 seed_device "$SB_C" "dev-403" "FAKE-FCM-TOKEN-403"
 fcm_script "$SB_C" \
-  <(echo '{"dev-ok": "FAKE-FCM-TOKEN-OK", "dev-429": "FAKE-FCM-TOKEN-429", "dev-404": "FAKE-FCM-TOKEN-404", "dev-403": "FAKE-FCM-TOKEN-403"}') \
+  <(echo '{"dev-ok": "FAKE-FCM-TOKEN-OK", "dev-429": "FAKE-FCM-TOKEN-429", "dev-404": "FAKE-FCM-TOKEN-404", "dev-404u": "FAKE-FCM-TOKEN-404U", "dev-403": "FAKE-FCM-TOKEN-403"}') \
   <(echo '{"dev-ok": [{"status": 200, "name": "projects/drill-project/messages/m-ok"}],
            "dev-429": [{"status": 429, "retry_after": 1, "error_status": "QUOTA_EXCEEDED"},
                        {"status": 200, "name": "projects/drill-project/messages/m-429"}],
-           "dev-404": [{"status": 404, "error_status": "UNREGISTERED"}],
+           "dev-404": [{"status": 404, "error_status": "NOT_FOUND"}],
+           "dev-404u": [{"status": 404, "error_status": "UNREGISTERED"}],
            "dev-403": [{"status": 403, "error_status": "SENDER_ID_MISMATCH"}]}')
 
 RC_C=0; run_dispatcher "$SB_C" 0 || RC_C=$?
@@ -412,21 +418,28 @@ if len(sends.get("dev-429", [])) == 2:
 else:
     ck("dev-429 has two send markers", False)
 dev_404 = by_dev.get("dev-404", [])
-ck("dev-404 FAILED UNREGISTERED",
+ck("dev-404 FAILED NOT_FOUND (the measured wire form)",
    len(dev_404) == 1 and dev_404[0]["state"] == "FAILED" and
-   dev_404[0]["error_code"] == "UNREGISTERED")
+   dev_404[0]["error_code"] == "NOT_FOUND")
+dev_404u = by_dev.get("dev-404u", [])
+ck("dev-404u FAILED UNREGISTERED (the error-table form)",
+   len(dev_404u) == 1 and dev_404u[0]["state"] == "FAILED" and
+   dev_404u[0]["error_code"] == "UNREGISTERED")
 dev_403 = by_dev.get("dev-403", [])
 ck("dev-403 FAILED SENDER_ID_MISMATCH",
    len(dev_403) == 1 and dev_403[0]["state"] == "FAILED" and
    dev_403[0]["error_code"] == "SENDER_ID_MISMATCH")
-ck("all four devices served (403 did not block the sweep)",
-   set(by_dev) == {"dev-ok", "dev-429", "dev-404", "dev-403"})
+ck("all five devices served (403 did not block the sweep)",
+   set(by_dev) == {"dev-ok", "dev-429", "dev-404", "dev-404u",
+                   "dev-403"})
 sys.exit(1 if fails else 0)
 PYEOF
 check_eq "C per-device outcome contract" 0 $?
 masked_projection "$SB_C"
-check_contains "C registry retired the 404 token (hash only)" \
+check_contains "C registry retired the 404 tokens (hash only)" \
   "$(cat "$SB_C/registry.masked.jsonl")" "token_invalid"
+check_eq "C registry retired BOTH 404 code names (NOT_FOUND + UNREGISTERED)" 2 \
+  "$(grep -c "token_invalid" "$SB_C/registry.masked.jsonl")"
 check_not_contains "C registry projection has no raw token" \
   "$(cat "$SB_C/registry.masked.jsonl")" "FAKE-FCM-TOKEN"
 
@@ -438,7 +451,7 @@ mv "$SB_C/dispatch.err" "$SB_C/dispatch-1.err"
 RC_C2=0; run_dispatcher "$SB_C" 0 || RC_C2=$?
 check_eq "C rerun exit 0 (all pairs terminal)" 0 "$RC_C2"
 SENDS_C_BEFORE="$(grep -c " SEND " "$SB_C/wire.log" || true)"
-check_eq "C rerun sends nothing (5 sends total)" 5 "$SENDS_C_BEFORE"
+check_eq "C rerun sends nothing (6 sends total)" 6 "$SENDS_C_BEFORE"
 collect_evidence "$SB_C" c || true
 
 # ------------------------------------------------------------------ D
