@@ -271,7 +271,7 @@ jobs:
           [ -x "$bin" ] || { echo "REFUSED: ${bin} is missing" >&2; exit 1; }
           out="$("$bin" selftest)"
           printf '%s\n' "$out"
-          printf '%s\n' "$out" | grep -F 'SELFTEST bytes=OK bars=22 signals=8'
+          printf '%s\n' "$out" | grep -F 'SELFTEST bytes=OK bars=22 signals=4'
           # 'SELFTEST provenance=NOT_CANONICAL' is expected even here: the
           # smoke run deliberately records fixture provenance
           # (tests/test_cli_contract.sh asserts the same for dev builds).

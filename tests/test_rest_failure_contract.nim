@@ -93,7 +93,7 @@ block noRestRegression:
   let res = runCore(loadRecords("fixtures/smoke/input.hcj.jsonl"))
   check("committed fixture (no rest_resp) is still rsOk", res.status == rsOk)
   check("committed fixture bars/signals unchanged",
-        res.bars.len == 22 and res.signals.len == 8)
+        res.bars.len == 22 and res.signals.len == 4)
   check("synthetic base stream (no rest_resp) is rsOk",
         runOf("synth", baseLines()).status == rsOk)
 

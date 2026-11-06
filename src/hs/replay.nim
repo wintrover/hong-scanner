@@ -113,15 +113,40 @@ proc parseConfig*(raw: HcjValue): Config =
     result.pageCap = int(pc.ival)
   else:
     result.pageCap = defaultPageCap
+  # Symmetric judgment params (P23/§6). Each field is optional with a
+  # declared default meaning "pre-contract" (P24 pattern): an absent or
+  # legacy-named field (`lookback`, `pullback_min_bp`, ...) falls back to the
+  # default — a stream sealed before the VS-1 rewrite replays under its own
+  # commit's binary (§8 check 1), so old names reaching this parser are
+  # ignored, never a crash. Values that are present but impossible
+  # (negative bp thresholds, lookback_bars < 1, negative warmup) are parse
+  # failures: fail-closed, never silently reinterpreted.
+  # Default mapping from the legacy thresholds: countermove_min_bp 50 and
+  # directional_trigger_bp 30 continue pullback_min_bp/rebound_min_bp 50 and
+  # recovery_bp/breakdown_bp 30; trend_min_bp 50 starts at the same magnitude
+  # family (a trend must not confirm below its own countermove); window
+  # defaults keep lookback 3 / warmup 0. PH-1 freezes the real values.
   let p = if raw.has("params"): raw.get("params") else: hNull()
   result.params = Params(
-    lookback: intOr(p, "lookback", 3),
-    pullbackMinBp: intOr(p, "pullback_min_bp", 50),
-    recoveryBp: intOr(p, "recovery_bp", 30),
-    reboundMinBp: intOr(p, "rebound_min_bp", 50),
-    breakdownBp: intOr(p, "breakdown_bp", 30),
     warmupBars: intOr(p, "warmup_bars", 0),
+    lookbackBars: intOr(p, "lookback_bars", 3),
+    trendMinBp: intOr(p, "trend_min_bp", 50),
+    countermoveMinBp: intOr(p, "countermove_min_bp", 50),
+    directionalTriggerBp: intOr(p, "directional_trigger_bp", 30),
     holdOnDegraded: boolOr(p, "hold_on_degraded", true))
+  if result.params.warmupBars < 0:
+    raise newException(RecordError,
+      "params.warmup_bars must be >= 0: " & $result.params.warmupBars)
+  if result.params.lookbackBars < 1:
+    raise newException(RecordError,
+      "params.lookback_bars must be >= 1: " & $result.params.lookbackBars)
+  if result.params.trendMinBp < 0 or result.params.countermoveMinBp < 0 or
+      result.params.directionalTriggerBp < 0:
+    raise newException(RecordError,
+      "params bp thresholds must be >= 0: trend=" &
+        $result.params.trendMinBp & " countermove=" &
+        $result.params.countermoveMinBp & " trigger=" &
+        $result.params.directionalTriggerBp)
 
 proc reqField(raw: HcjValue; key: string): HcjValue =
   if raw.kind != hkObj:

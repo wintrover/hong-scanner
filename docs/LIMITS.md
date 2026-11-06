@@ -15,8 +15,7 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | no WebSocket client exists in VS-1 | handshake, framing, masking, close codes are VS-2 work | VS-2 |
 | the consumption check has a no-sub boundary | it applies to `0B` `ws_raw` ticks only; a stream with `0B` ticks but no subscription evidence at all has every tick quarantined (an honest result), and `ws_frame` synthetic ticks (VS-1) are not checked — the existing synthetic gate passes unharmed | tools/collector/README.md §10 |
 | strategy validity is not established | synthetic fixtures are not evidence of market behavior or profitability | PH-2 |
-| `breakdown_bp` is parsed but not applied | its reference and comparison are undefined, so bearish candidates are held instead of emitted | VS-1 rewrite (§6 frozen VS-A) |
-| strategy evidence windows are not a market-validity proof | tainted evidence is held within each algorithm's dependency window, but thresholds and actual vendor field semantics still require validation | PH-1/PH-2 |
+| strategy evidence windows are not a market-validity proof | tainted evidence is held within the shared dependency window, but thresholds and actual vendor field semantics still require validation | PH-1/PH-2 |
 | a late session-flag conflict can degrade a closed bar in batch replay | live emissions need a finality or retraction contract before they are published | VS-2 live output contract |
 | thresholds come from a synthetic fixture | PH-1 calibrates them on a real capture; that same session cannot also prove detection | PH-1/PH-2 |
 | signals == 0 on a real day is not a bug | `NO_TRIGGER_OBSERVED` is a valid outcome | PH-2 |
@@ -56,7 +55,7 @@ What the VS-1 result does **not** prove. Each line names who owns the proof.
 | supervisor SIGKILL escalation and run-id suffix exhaustion are untested live | the supervisor suite covers the contract surface with fake children and an injected clock; SIGKILL after the grace window and the attempt-cap-exhausted path (`-a`·`-b`·`-c` all present, day uncommitted) have no live observation | NF-7 |
 | the cloud sidecar is demo-only | it refuses any base other than demo/mockapi (P19); production Kiwoom over a cloud egress is unmeasured and needs a separate confirmation | NF-3 |
 | a late start recovers bars, not observation | a ka10080 backfill reconstructs 3-minute bars, never the live stream: the 300 s candidate churn, the WS tick order and every unobserved event of the downtime are unrecoverable — a `LATE_START` session never becomes `FULL_SESSION` (P22) | VS-2C |
-| the symmetric contract is frozen ahead of its implementation | REPLAY_CONTRACT §6 (frozen VS-A) is the target contract; the running engine is the legacy asymmetric §6.1 until the VS-1 rewrite, so runs sealed before it follow legacy semantics under their own commit's binary | VS-1 |
+| pre-rewrite sealed runs carry legacy semantics | runs sealed before the VS-1 symmetric rewrite (2026-11-06) were produced by the legacy asymmetric engine; §8 check 1 replays each run only under its own commit's binary, so those runs never re-verify under the symmetric engine | inherent (§8 check 1) |
 | `origin`, `contract_version`, `session_mode` are declared, not produced | the fields exist as contract text (REPLAY_CONTRACT §7/§12.8; P21/P22/P24) until VS-2B/VS-2C emit them; absent fields keep pre-contract semantics | VS-2B/VS-2C |
 
 ## Explicit non-goals
