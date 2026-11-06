@@ -62,6 +62,17 @@ proc newCfg(tokenSource: string): CollectorConfig =
            holdOnDegraded: true),
     calRaw(), tokenSource)
 
+proc newEnvCfg(environment: string): CollectorConfig =
+  ## The same approved config with the environment as the only variable:
+  ## every endpoint must be derived from that one selection.
+  initCollectorConfig(
+    "2026-10-29", environment, "demo-profile",
+    "000", "0000", "0", "0", "1", "0", "0", "1",
+    Params(warmupBars: 0, lookbackBars: 3, trendMinBp: 50,
+           countermoveMinBp: 50, directionalTriggerBp: 30,
+           holdOnDegraded: true),
+    calRaw())
+
 proc evLine(ps: seq[HcjPair]): string =
   canonical(hObj(ps))
 
@@ -164,11 +175,55 @@ block config:
         "\"environment\":\"demo\"" in canonical(pre[1].raw) and
         "\"repoll_seconds\":300" in canonical(pre[1].raw) and
         "\"page_cap\":10" in canonical(pre[1].raw))
-  coreErr("a non-demo environment is refused", "demo environment only",
-          proc () =
-            discard initCollectorConfig(
-              "2026-10-29", "prod", "p", "000", "0000", "0", "0", "1", "0",
-              "0", "1", Params(), calRaw()))
+  coreErr("a non-approved environment is refused (staging)",
+          "environment must be demo or real", proc () =
+    discard initCollectorConfig(
+      "2026-10-29", "staging", "p", "000", "0000", "0", "0", "1", "0",
+      "0", "1", Params(), calRaw()))
+  coreErr("the retired prod name is refused (never aliased to real)",
+          "environment must be demo or real", proc () =
+    discard initCollectorConfig(
+      "2026-10-29", "prod", "p", "000", "0000", "0", "0", "1", "0",
+      "0", "1", Params(), calRaw()))
+  coreErr("an empty environment is refused (no default fallback)",
+          "environment must be demo or real", proc () =
+    discard initCollectorConfig(
+      "2026-10-29", "", "p", "000", "0000", "0", "0", "1", "0",
+      "0", "1", Params(), calRaw()))
+  coreErr("restDomainFor refuses an unknown environment",
+          "environment must be demo or real", proc () =
+    discard restDomainFor("prod"))
+  coreErr("wsEndpointFor refuses an unknown environment",
+          "environment must be demo or real", proc () =
+    discard wsEndpointFor("prod"))
+  let demo = newEnvCfg("demo")
+  let real = newEnvCfg("real")
+  check("demo derives the official mock domains",
+        demo.restDomain == "https://mockapi.kiwoom.com" and
+        demo.wsEndpoint == "wss://mockapi.kiwoom.com:10000/api/dostk/websocket")
+  check("real derives the official operational domains (no mixing)",
+        real.restDomain == "https://api.kiwoom.com" and
+        real.wsEndpoint == "wss://api.kiwoom.com:10000/api/dostk/websocket")
+  check("real carries the environment through the init line verbatim",
+        "\"environment\":\"real\"" in real.initLine() and
+        "\"rest_domain\":\"https://api.kiwoom.com\"" in real.initLine() and
+        "\"ws_endpoint\":\"wss://api.kiwoom.com:10000/api/dostk/websocket\"" in
+        real.initLine() and
+        "mockapi" notin real.initLine())
+  check("demo still carries the demo domains through the init line",
+        "\"environment\":\"demo\"" in demo.initLine() and
+        "\"rest_domain\":\"https://mockapi.kiwoom.com\"" in demo.initLine() and
+        "\"://api.kiwoom.com" notin demo.initLine())
+  let preReal = real.preambleRecords()
+  check("the real config record records the real environment and domains",
+        "\"environment\":\"real\"" in canonical(preReal[1].raw) and
+        "\"rest_domain\":\"https://api.kiwoom.com\"" in
+          canonical(preReal[1].raw) and
+        "mockapi" notin canonical(preReal[1].raw))
+  let cReal = startCollector(real)
+  check("a real session runs the same state machine (demo and real " &
+        "differ only in the derived endpoints)",
+        cReal.phase == phStart and cReal.cfg.environment == "real")
   try:
     discard initCollectorConfig(
       "2026-10-31", "demo", "p", "000", "0000", "0", "0", "1", "0",

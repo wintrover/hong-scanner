@@ -73,23 +73,29 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
  "ack_timeout_seconds":10,"watchdog":"15:40:00+09:00","profile":"<alias>"}
 ```
 
-- `environment`는 이 슬라이스에서 `"demo"`만 허용된다(PH-1). sidecar도
-  이중 검사한다. demo 엔드포인트 고정 규칙은 아래 `ws_endpoint` 항목이
-  정의한다(`rest_domain`·`ws_endpoint` 정확히 일치해야 시작).
+- `environment`는 이 슬라이스의 운영 환경 선택이다: `"demo"`(기본값,
+  모의 서버) | `"real"`(운영 서버). 이 두 값만 존재한다("prod"는 폐기된
+  이름 — 어디서도 수용하지 않는다). `rest_domain`·`ws_endpoint`는 이
+  선택에서 파생된다(아래 항목). **환경 간 혼합은 시작 거부다**: demo 선택에
+  real 도메인(또는 그 반대)을 실으면 sidecar는 시작하지 않는다. 다른
+  환경으로의 자동 대체 접속은 존재하지 않는다(fail-closed).
 - `rest_params`는 ka10027 9필드 중 `sort_tp`를 제외한 8필드(방향별로
   core가 `sort_tp` 1/3을 붙여 요청한다). 값 도메인은 vendor_input.nim의
   공식 enum 검증을 통과해야 한다.
-- `ws_endpoint`는 모의 WS 베이스(`wss://mockapi.kiwoom.com:10000`,
-  SDK `DEFAULT_WS_BASE_URLS["demo"]`)에 공식 WS API 경로
+- `ws_endpoint`는 선택된 환경의 WS 베이스에 공식 WS API 경로
   `/api/dostk/websocket`(kwcli `api_commands.csv` ka10171~73의 WS 경로,
   SDK `ws_client.connect`는 `uri = base + api_url`로 합성)를 붙인
-  **실제 접속 URI 전체**다. 2026-11-02 14:3x KST 실측: 베이스만(루트
-  `/`)으로 보낸 opening handshake는 서버가 무응답(TimeoutError)이고,
+  **실제 접속 URI 전체**다. 베이스는 환경에서 정해진다: demo
+  `wss://mockapi.kiwoom.com:10000`(SDK `DEFAULT_WS_BASE_URLS["demo"]`),
+  real `wss://api.kiwoom.com:10000`(공식 서버 분리 문서, 포트 동일).
+  2026-11-02 14:3x KST 실측: 베이스만(루트 `/`)으로 보낸 opening
+  handshake는 서버가 무응답(TimeoutError)이고,
   `/api/dostk/websocket` 경로로 보내면 업그레이드가 완료된다(TCP·TLS
   1.3·Kiwoom EV 인증서는 양쪽 다 정상). 루트 무응답은 공식 문서에
   없는 관측 사실이다(경로 조합 자체는 공식 클라이언트 소스 근거).
-  `rest_domain`(`https://mockapi.kiwoom.com`)과 함께 — 정확히 이 값이
-  아니면 sidecar는 시작을 거부한다.
+  `rest_domain`(demo `https://mockapi.kiwoom.com`, real
+  `https://api.kiwoom.com`)과 함께 — **선택된 환경의 정확한 값이
+  아니면** sidecar는 시작을 거부한다.
 - `page_cap`=10(공식 예제 MAX_PAGES), `repoll_seconds`=300(§5 승인값),
   `drain_seconds`=10(§5), `ack_timeout_seconds`=10(승인된 drain 값과 같은
   "프로토콜 1단계 정적 한계"로 선언, §5 표에 명시된 값에서 유도 —
@@ -97,8 +103,9 @@ Nim collector-core (src/hs/collector.nim + tools/collector/collector.nim)
   마감 권위 아님).
 - `token_source`(선택): `"kiwoomcli"`(기본) | `"env"`. 미지정이면 무엇도
   바뀌지 않는다 — §5의 kiwoomcli 캐시 경로가 그대로 쓰인다. `"env"`면
-  sidecar가 APP_KEY_MOCK·APP_SECRET_MOCK 환경변수로 공식 OAuth 엔드포인트에
-  직접 발급한다(§5.1). 그 외 값은 시작 거부(exit 4)다.
+  sidecar가 **선택된 환경의** 자격 변수(demo `APP_KEY_MOCK`·
+  `APP_SECRET_MOCK`, real `APP_KEY_REAL`·`APP_SECRET_REAL`)로 공식 OAuth
+  엔드포인트에 직접 발급한다(§5.1). 그 외 값은 시작 거부(exit 4)다.
 - sidecar는 토큰을 여기서 확보한다(§5). 성공 시 `ready`, 실패 시
   `error(what=token)` 후 exit 3.
 
@@ -351,12 +358,18 @@ init 라인이 `"token_source":"env"`를 담을 때만 활성화되는 두 번�
 환경 — 클라우드 컨테이너다. 그 외의 모든 init 라인(미지정 포함)은 §5의
 kiwoomcli 경로와 완전히 동일하게 동작한다(기본 경로 불변).
 
-- 요청(공식 문서 계약 그대로): `POST https://mockapi.kiwoom.com/oauth2/token`,
+- 요청(공식 문서 계약 그대로): `POST <선택 환경 도메인>/oauth2/token` —
+  demo `https://mockapi.kiwoom.com/oauth2/token`, real
+  `https://api.kiwoom.com/oauth2/token`,
   `Content-Type: application/json`, 본문
   `{"grant_type":"client_credentials","appkey":<APP_KEY>,"secretkey":<APP_SECRET>}`.
-  자격 증명은 `APP_KEY_MOCK`·`APP_SECRET_MOCK` 환경변수에서만 읽는다.
-  누락·빈 값은 시작 거부다(error what=token, exit 3 — 기본값 대체·재시도
-  무한 금지).
+  자격 증명은 선택된 환경의 변수에서만 읽는다: demo는
+  `APP_KEY_MOCK`·`APP_SECRET_MOCK`, real은 `APP_KEY_REAL`·
+  `APP_SECRET_REAL`(공식 가이드: "키움증권은 실제 투자와 모의투자 App
+  Key를 별도로 관리합니다"). **한 환경의 변수를 다른 환경이 대신 쓰는
+  대체는 존재하지 않는다** — real 세션이 real 변수 없이 demo 변수로
+  시작하는 일은 거부된다(조합 불일치 fail-closed). 누락·빈 값은 시작
+  거부다(error what=token, exit 3 — 기본값 대체·재시도 무한 금지).
 - 응답(전부 소문자 필드): `token`, `token_type`("bearer"), `expires_dt`
   ("YYYYMMDDHHMMSS" KST 절대시각), `return_code`, `return_msg`. **표준
   JSON 파서로만** 파싱한다 — 정규식 수동 파싱 금지(공식 문서 예시의
@@ -382,10 +395,9 @@ kiwoomcli 경로와 완전히 동일하게 동작한다(기본 경로 불변).
   컨테이너 배치 시 발급과 사용의 egress IP가 달라지지 않도록 하는 것은
   배치 책임이다.
 - 엔드포인트 주입은 테스트 전용이다: EnvTokenProvider는 엔드포인트를
-  생성자로 주입받아 로컬 fake 서버로 검증되지만, 운영 값은 고정된 demo
-  도메인의 공식 OAuth 경로에서만 유도된다. init 라인의
-  `rest_domain`==`DEMO_REST_DOMAIN` 가드(§2.1)는 이 경로로도 절대
-  완화되지 않는다.
+  생성자로 주입받아 로컬 fake 서버로 검증되지만, 운영 값은 **선택된
+  환경의** 고정 도메인에서만 유도된다. init 라인의 환경·
+  `rest_domain` 일치 가드(§2.1)는 이 경로로도 절대 완화되지 않는다.
 
 ## 6. 기록 규칙 (이미 커밋된 계약 그대로)
 
@@ -414,7 +426,7 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
 ### 6.1 config 레코드 (PH-1 승인값 전부 기록)
 
 ```json
-{"environment":"demo","market":"KRX",
+{"environment":"demo|real","market":"KRX",
  "candidate_query":{"mrkt_tp":"000","trde_qty_cnd":"0000","stk_cnd":"0",
    "crd_cnd":"0","updown_incls":"1","pric_cnd":"0","trde_prica_cnd":"0",
    "stex_tp":"1","sort_tp":"1|3 양방향"},
@@ -423,10 +435,14 @@ durable-completion 프로토콜이 이미 내구를 보장하므로 이 규칙 �
  "subscription_caps":{"per_direction":100,"total":200},
  "selection_policy":"kiwoom_response_order_first_100_v1",
  "collector":{"schema":"hong-scanner-collector-config/1",
-   "api_id":"ka10027","rest_domain":"https://mockapi.kiwoom.com",
-   "ws_endpoint":"wss://mockapi.kiwoom.com:10000/api/dostk/websocket","profile":"<alias>"},
+   "api_id":"ka10027","rest_domain":"<선택 환경 도메인>",
+   "ws_endpoint":"<선택 환경 WS 엔드포인트>","profile":"<alias>"},
  "params":{...}, "session_date":"..."}
 ```
+
+`environment`는 `"demo"`|`"real"` 둘뿐이고("prod"는 폐기된 이름),
+`collector.rest_domain`·`collector.ws_endpoint`는 그 선택에서 파생된
+값이 기록된다(§2.1).
 
 `repoll_seconds`·`page_cap`의 config 선언은 rest_resp.nim이 예약한
 "승인된 확장 경로"다: cadence가 선언된 스트림에서만 같은 스코프의
@@ -586,8 +602,9 @@ composeRegData에 도달하는 경로는 없다.
 - 게이트: `bash tools/run_tests.sh` exit 0 + `ALL CONTRACT SUITES PASSED`
   (새 스위트 포함). CI는 python 3.13 설치 단계를 갖는다.
 - 실행(라이브, 별도 사전검증 단계에서만): 
-  `tools/collector/collector --profile <alias> --session-date YYYY-MM-DD --out runs/<dir>`
-  — 개발 중 라이브 호출 금지(하드 규칙). 바이너리는
+  `tools/collector/collector --profile <alias> --session-date YYYY-MM-DD
+  --out runs/<dir> [--environment=demo|real]` — 기본값은 demo다.
+  개발 중 라이브 호출 금지(하드 규칙). 바이너리는
   `nim c -d:release --path:src -o:tools/collector/collector tools/collector/collector.nim`.
 
 ## 12. UNVERIFIED·사전 검증 목록 (merge 후 실측 항목)

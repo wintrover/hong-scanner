@@ -147,6 +147,8 @@ assert_contains "the gap closes as incomplete (never success)" "$LAST" \
 INIT1="$(cat "$SANDBOX/initdump.txt")"
 assert_contains "default init line names the kiwoomcli token source" \
   "$INIT1" '"token_source":"kiwoomcli"'
+assert_contains "the default environment stays demo (the declared default)" \
+  "$INIT1" '"environment":"demo"'
 
 RUN2="$SANDBOX/run-env"
 RC2=0
@@ -170,6 +172,51 @@ RC3=0
 assert_eq "a non-approved --token-source is refused (exit 2)" 2 "$RC3"
 assert_absent_file "the refused run started nothing (no input log)" \
   "$RUN3/input.hcj.jsonl"
+
+# ----------------------------------------------------- environment flag
+# --environment selects the operating environment and every endpoint is
+# derived from it (README §2.1): the stub dumps the init line, so a real
+# run must carry the real domains and nothing demo. "prod" (retired) and
+# any other name is a usage refusal (exit 2) — there is never a fallback
+# to another environment.
+RUN4="$SANDBOX/run-real"
+RC4=0
+(cd "$SANDBOX" && HSCOLLECTOR_PYTHON=python3 PYTHONDONTWRITEBYTECODE=1 \
+  "$BIN" --profile=pipe-test --session-date=2026-10-30 \
+  --calendar="$SANDBOX/cal.json" --out="$RUN4" --environment=real \
+  > "$SANDBOX/collector4.stdout" 2> "$SANDBOX/collector4.stderr") || RC4=$?
+assert_eq "--environment=real run is the same honest INCOMPLETE (4)" 4 "$RC4"
+INIT4="$(cat "$SANDBOX/initdump.txt")"
+assert_contains "the real run's init line carries the real environment" \
+  "$INIT4" '"environment":"real"'
+assert_contains "the real run's init line carries the real REST domain" \
+  "$INIT4" '"rest_domain":"https://api.kiwoom.com"'
+assert_contains "the real run's init line carries the real WS endpoint" \
+  "$INIT4" '"ws_endpoint":"wss://api.kiwoom.com:10000/api/dostk/websocket"'
+assert_not_contains "the real run's init line has no mock domain" \
+  "$INIT4" "mockapi"
+REALLOG="$(cat "$RUN4/input.hcj.jsonl")"
+assert_contains "the real config record carries the real REST domain" \
+  "$REALLOG" '"rest_domain":"https://api.kiwoom.com"'
+assert_contains "the real config record carries the environment" \
+  "$REALLOG" '"environment":"real"'
+assert_not_contains "the real stream never records a mock domain" \
+  "$REALLOG" "mockapi"
+
+for BADENV in prod staging ""; do
+  RUNB="$SANDBOX/run-badenv-$BADENV"
+  RCB=0
+  (cd "$SANDBOX" && HSCOLLECTOR_PYTHON=python3 PYTHONDONTWRITEBYTECODE=1 \
+    "$BIN" --profile=pipe-test --session-date=2026-10-30 \
+    --calendar="$SANDBOX/cal.json" --out="$RUNB" \
+    --environment="$BADENV" \
+    > "$SANDBOX/collectorb.stdout" 2> "$SANDBOX/collectorb.stderr") || RCB=$?
+  assert_eq "a non-approved --environment='$BADENV' is refused (exit 2)" 2 "$RCB"
+  assert_contains "the refusal names the environment rule" \
+    "$(cat "$SANDBOX/collectorb.stderr")" "--environment must be demo or real"
+  assert_absent_file "the refused environment run started nothing" \
+    "$RUNB/input.hcj.jsonl"
+done
 
 echo
 if [ "$FAILED" -eq 0 ]; then

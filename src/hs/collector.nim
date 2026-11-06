@@ -46,10 +46,10 @@ type
 
   CollectorConfig* = object
     sessionDate*: string
-    environment*: string       ## "demo" only (PH-1)
+    environment*: string       ## "demo" | "real" (the only two names)
     apiId*: string             ## ka10027
-    restDomain*: string        ## https://mockapi.kiwoom.com (spec 모의 도메인)
-    wsEndpoint*: string        ## demo WS base + /api/dostk/websocket (SDK ws_client)
+    restDomain*: string        ## derived from the environment (official split)
+    wsEndpoint*: string        ## environment WS base + /api/dostk/websocket
     mrktTp*, trdeQtyCnd*, stkCnd*, crdCnd*: string
     updownIncls*, pricCnd*, trdePricaCnd*, stexTp*: string
     pageCap*: int              ## approved PH-1 value 10
@@ -134,7 +134,30 @@ proc cerr(msg: string): ref CollectorError =
 const
   demoRestDomain* = "https://mockapi.kiwoom.com"
   demoWsEndpoint* = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+  realRestDomain* = "https://api.kiwoom.com"
+  realWsEndpoint* = "wss://api.kiwoom.com:10000/api/dostk/websocket"
   approvedWatchdog* = "15:40:00+09:00"
+
+proc restDomainFor*(environment: string): string =
+  ## The REST domain derived from the selected environment — the official
+  ## server-split constants (ASSUMPTIONS "Vendor facts": 운영
+  ## https://api.kiwoom.com / 모의 https://mockapi.kiwoom.com). There is no
+  ## caller-supplied domain and no cross-environment fallback: an unknown
+  ## environment name is refused, never defaulted.
+  case environment
+  of "demo": demoRestDomain
+  of "real": realRestDomain
+  else: raise cerr("environment must be demo or real: " & environment)
+
+proc wsEndpointFor*(environment: string): string =
+  ## The WS endpoint derived from the selected environment: the official
+  ## base (wss://api.kiwoom.com:10000 / wss://mockapi.kiwoom.com:10000)
+  ## plus the official WS API path /api/dostk/websocket — the same
+  ## composition rule for both environments.
+  case environment
+  of "demo": demoWsEndpoint
+  of "real": realWsEndpoint
+  else: raise cerr("environment must be demo or real: " & environment)
 
 proc initCollectorConfig*(sessionDate, environment, profile: string;
                           mrktTp, trdeQtyCnd, stkCnd, crdCnd, updownIncls,
@@ -142,12 +165,11 @@ proc initCollectorConfig*(sessionDate, environment, profile: string;
                           params: Params; calendar: HcjValue;
                           tokenSource = "kiwoomcli"): CollectorConfig =
   ## Build and validate the collector configuration. The approved PH-1
-  ## values are pinned here (README §5/§6.1): demo endpoints, page cap 10,
-  ## repoll 300 s, drain 10 s, ack timeout 10 s, watchdog 15:40 KST. A
-  ## different value is refused, never silently run.
-  if environment != "demo":
-    raise cerr("this slice runs the demo environment only (PH-1): " &
-               environment)
+  ## values are pinned here (README §5/§6.1): environment-derived
+  ## endpoints, page cap 10, repoll 300 s, drain 10 s, ack timeout 10 s,
+  ## watchdog 15:40 KST. A different value is refused, never silently run.
+  if environment != "demo" and environment != "real":
+    raise cerr("environment must be demo or real: " & environment)
   if sessionDate.len != 10 or sessionDate[4] != '-' or sessionDate[7] != '-':
     raise cerr("session_date must be YYYY-MM-DD: " & sessionDate)
   for i in [0, 1, 2, 3, 5, 6, 8, 9]:
@@ -176,8 +198,8 @@ proc initCollectorConfig*(sessionDate, environment, profile: string;
     sessionDate: sessionDate,
     environment: environment,
     apiId: ka10027ApiId,
-    restDomain: demoRestDomain,
-    wsEndpoint: demoWsEndpoint,
+    restDomain: restDomainFor(environment),
+    wsEndpoint: wsEndpointFor(environment),
     mrktTp: mrktTp, trdeQtyCnd: trdeQtyCnd, stkCnd: stkCnd, crdCnd: crdCnd,
     updownIncls: updownIncls, pricCnd: pricCnd,
     trdePricaCnd: trdePricaCnd, stexTp: stexTp,

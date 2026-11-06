@@ -42,14 +42,19 @@ FRESH_TOKEN = "REFRESHED-TOKEN"
 TOKEN_TYPE = "Bearer"
 # The token_source="env" fixtures (README §5.1). Fake values; the suite
 # runner greps its own output for every fixture secret below and fails
-# if any of them ever reaches it.
+# if any of them ever reaches it. The *_REAL pair is the real
+# environment's separate credential set — never substituted for the demo
+# pair and vice versa.
 ENV_APP_KEY = "FAKE-ENV-APPKEY-VALUE"
 ENV_APP_SECRET = "FAKE-ENV-SECRET-VALUE"
+ENV_APP_KEY_REAL = "FAKE-REAL-APPKEY-VALUE"
+ENV_APP_SECRET_REAL = "FAKE-REAL-SECRET-VALUE"
 ENV_TOKEN = "FAKE-ENV-TOKEN-1"
 ENV_TOKEN_2 = "FAKE-ENV-TOKEN-2"
 ENV_TOKEN_3 = "FAKE-ENV-TOKEN-3"
 ENV_SECRET_FIXTURES = ("TOKEN", "FRESH_TOKEN", "ENV_APP_KEY",
-                       "ENV_APP_SECRET", "ENV_TOKEN", "ENV_TOKEN_2",
+                       "ENV_APP_SECRET", "ENV_APP_KEY_REAL",
+                       "ENV_APP_SECRET_REAL", "ENV_TOKEN", "ENV_TOKEN_2",
                        "ENV_TOKEN_3")
 
 
@@ -71,15 +76,16 @@ def kst_now():
     return datetime.now(sidecar.KST)
 
 
-def approved_cfg():
+def approved_cfg(environment="demo"):
     """The exact PH-1 approved configuration (README §2.1); tests may
     only shrink the timers through the Sidecar constructor, never these
-    pinned values."""
-    return {
+    pinned values. The environment selects the pinned endpoints: "demo"
+    or "real"."""
+    cfg = {
         "protocol": 1,
-        "environment": "demo",
-        "rest_domain": sidecar.DEMO_REST_DOMAIN,
-        "ws_endpoint": sidecar.DEMO_WS_ENDPOINT,
+        "environment": environment,
+        "rest_domain": sidecar.environment_rest_domain(environment),
+        "ws_endpoint": sidecar.environment_ws_endpoint(environment),
         "api_id": "ka10027",
         "page_cap": 10,
         "repoll_seconds": 300,
@@ -89,6 +95,9 @@ def approved_cfg():
         "profile": "test-profile",
         "rest_params": {key: "1" for key in sidecar.REST_PARAMS_FIELDS},
     }
+    if environment not in sidecar.ENVIRONMENTS:
+        raise AssertionError("approved_cfg only builds demo or real")
+    return cfg
 
 
 def token_cache_path(cache_dir, profile="test-profile"):
@@ -436,6 +445,51 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg["api_id"], "ka10027")
         self.assertEqual(sorted(cfg["rest_params"]),
                          sorted(sidecar.REST_PARAMS_FIELDS))
+        self.assertEqual(cfg["environment"], "demo")
+        self.assertEqual(cfg["rest_domain"], sidecar.DEMO_REST_DOMAIN)
+        self.assertEqual(cfg["ws_endpoint"], sidecar.DEMO_WS_ENDPOINT)
+
+    def test_init_accepts_the_real_environment_with_its_own_domains(self):
+        # "real" is the operational split (official server-split
+        # document): every endpoint is environment-derived and no mock
+        # value survives.
+        cfg = sidecar.parse_init(json.dumps(approved_cfg("real")))
+        self.assertEqual(cfg["environment"], "real")
+        self.assertEqual(cfg["rest_domain"], "https://api.kiwoom.com")
+        self.assertEqual(
+            cfg["ws_endpoint"],
+            "wss://api.kiwoom.com:10000/api/dostk/websocket")
+
+    def test_init_refuses_cross_environment_mixes(self):
+        # Fail-closed: the domains must match the environment's own
+        # pinned values — a demo session on real endpoints (or the
+        # reverse) is a refused configuration, never a silently-run mix.
+        def mix(environment, rest_domain, ws_endpoint):
+            cfg = approved_cfg(environment)
+            cfg["rest_domain"] = rest_domain
+            cfg["ws_endpoint"] = ws_endpoint
+            return json.dumps(cfg)
+
+        cases = [
+            ("demo environment with the real rest_domain",
+             mix("demo", sidecar.REAL_REST_DOMAIN,
+                 sidecar.DEMO_WS_ENDPOINT)),
+            ("demo environment with the real ws_endpoint",
+             mix("demo", sidecar.DEMO_REST_DOMAIN,
+                 sidecar.REAL_WS_ENDPOINT)),
+            ("real environment with the demo rest_domain",
+             mix("real", sidecar.DEMO_REST_DOMAIN,
+                 sidecar.REAL_WS_ENDPOINT)),
+            ("real environment with the demo ws_endpoint",
+             mix("real", sidecar.REAL_REST_DOMAIN,
+                 sidecar.DEMO_WS_ENDPOINT)),
+            ("real environment with a foreign domain",
+             mix("real", "https://evil.example", sidecar.REAL_WS_ENDPOINT)),
+        ]
+        for name, line in cases:
+            with self.assertRaises(sidecar.SidecarExit) as cm:
+                sidecar.parse_init(line)
+            self.assertEqual(cm.exception.code, 4, name)
 
     def test_init_token_source_is_optional_and_pinned(self):
         # Absent: the kiwoomcli default — no behavior may change for an
@@ -454,6 +508,16 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(sc.store, sidecar.EnvTokenProvider)
         self.assertEqual(sc.store.endpoint,
                          sidecar.DEMO_REST_DOMAIN +
+                         sidecar.OAUTH_TOKEN_PATH)
+        # The real environment derives the real OAuth endpoint from the
+        # same one selection — never the demo domain.
+        cfg = approved_cfg("real")
+        cfg["token_source"] = "env"
+        sc = sidecar.Sidecar(cfg)
+        self.assertIsInstance(sc.store, sidecar.EnvTokenProvider)
+        self.assertEqual(sc.store.environment, "real")
+        self.assertEqual(sc.store.endpoint,
+                         sidecar.REAL_REST_DOMAIN +
                          sidecar.OAUTH_TOKEN_PATH)
         # Every other value (including a non-string) is refused.
         for bad in ("native", "", None, 3):
@@ -476,6 +540,8 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         bad_lines = [
             ("protocol", mutate(protocol=2)),
             ("environment", mutate(environment="prod")),
+            ("environment absent", mutate(environment=None)),
+            ("environment non-string", mutate(environment=3)),
             ("rest_domain", mutate(rest_domain="https://evil.example")),
             ("ws_endpoint", mutate(ws_endpoint="wss://evil.example:10000")),
             ("api_id", mutate(api_id="ka10099")),
@@ -1481,6 +1547,65 @@ class EnvTokenProviderContract(unittest.TestCase):
             provider.get()
         self.assertIn("APP_SECRET_MOCK", str(cm.exception))
         self.assertEqual(len(server.recorded), 0)
+
+    def test_env_real_issuance_uses_the_real_variable_pair(self):
+        # The real environment reads APP_KEY_REAL/APP_SECRET_REAL — the
+        # pair is separate by design (official guide: 실제 투자와 모의투자
+        # App Key는 별도 관리). The demo pair is entirely absent here.
+        patch_environ(self, "APP_KEY_REAL", ENV_APP_KEY_REAL)
+        patch_environ(self, "APP_SECRET_REAL", ENV_APP_SECRET_REAL)
+        os.environ.pop("APP_KEY_MOCK", None)
+        os.environ.pop("APP_SECRET_MOCK", None)
+        expires = float(int(time.time())) + 3600.0
+        server = FakeTokenServer(self, [{
+            "token": ENV_TOKEN, "token_type": "bearer",
+            "expires_dt": env_expires_dt(expires),
+            "return_code": 0, "return_msg": ""}])
+        provider = sidecar.EnvTokenProvider(server.endpoint,
+                                            environment="real")
+        self.assertEqual(provider.get(), (ENV_TOKEN, "bearer"))
+        self.assertEqual(len(server.recorded), 1)
+        self.assertEqual(server.recorded[0]["body"],
+                         {"grant_type": "client_credentials",
+                          "appkey": ENV_APP_KEY_REAL,
+                          "secretkey": ENV_APP_SECRET_REAL})
+
+    def test_env_real_missing_credentials_never_substitute_the_demo_pair(self):
+        # Combination mismatch is fail-closed: a real session with only
+        # the demo variables present refuses (naming the real variable),
+        # and a demo session with only the real variables present refuses
+        # (naming the demo variable). No request is ever sent — the other
+        # environment's credentials are never borrowed.
+        server = FakeTokenServer(self, [])
+        # real session, demo pair present, real pair absent.
+        os.environ.pop("APP_KEY_REAL", None)
+        os.environ.pop("APP_SECRET_REAL", None)
+        provider = sidecar.EnvTokenProvider(server.endpoint,
+                                            environment="real")
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertIn("APP_KEY_REAL", str(cm.exception))
+        self.assertNotIn("APP_KEY_MOCK", str(cm.exception))
+        self.assertEqual(len(server.recorded), 0)
+        # demo session, real pair present, demo pair absent.
+        patch_environ(self, "APP_KEY_REAL", ENV_APP_KEY_REAL)
+        patch_environ(self, "APP_SECRET_REAL", ENV_APP_SECRET_REAL)
+        os.environ.pop("APP_KEY_MOCK", None)
+        os.environ.pop("APP_SECRET_MOCK", None)
+        provider = sidecar.EnvTokenProvider(server.endpoint)
+        with self.assertRaises(sidecar.TokenError) as cm:
+            provider.get()
+        self.assertIn("APP_KEY_MOCK", str(cm.exception))
+        self.assertNotIn("APP_KEY_REAL", str(cm.exception))
+        self.assertNotIn(ENV_APP_KEY_REAL, str(cm.exception))
+        self.assertEqual(len(server.recorded), 0)
+
+    def test_env_unknown_environment_is_refused_at_construction(self):
+        # "prod" is a retired name: no provider is built for it at all.
+        for bad in ("prod", "staging", "", None):
+            with self.assertRaises(ValueError):
+                sidecar.EnvTokenProvider("http://127.0.0.1:1/token",
+                                         environment=bad)
 
     def test_env_return_code_failure_retries_once_then_raises(self):
         server = FakeTokenServer(self, [

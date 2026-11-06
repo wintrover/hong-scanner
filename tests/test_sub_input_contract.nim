@@ -685,13 +685,16 @@ block composeFailures:
 block configEnvironment:
   check("config: demo is accepted",
         parseConfig(cfgRaw("demo")).environment == "demo")
-  check("config: prod is accepted",
-        parseConfig(cfgRaw("prod")).environment == "prod")
+  check("config: real is accepted",
+        parseConfig(cfgRaw("real")).environment == "real")
   check("config: absent environment stays valid and undeclared",
         parseConfig(cfgRaw()).environment == "")
   recordErrorUnit("config: another value is a contract failure",
-                  "not demo|prod: staging",
+                  "not demo|real: staging",
                   proc () = discard parseConfig(cfgRaw("staging")))
+  recordErrorUnit("config: the retired prod name is a contract failure",
+                  "not demo|real: prod",
+                  proc () = discard parseConfig(cfgRaw("prod")))
   recordErrorUnit("config: a non-string environment is a contract failure",
                   "not a string",
                   proc () =
@@ -881,12 +884,12 @@ block tornTailRules:
         "REJECT", plainV.verdict == vContract and
         exitCode(plainV.verdict) == 2)
 
-  let tornProd = writeStream("torn-prod", baseLines("prod"))
-  writeFile(tornProd / inputFile,
-            readFile(tornProd / inputFile) & "{")
+  let tornReal = writeStream("torn-real", baseLines("real"))
+  writeFile(tornReal / inputFile,
+            readFile(tornReal / inputFile) & "{")
   check("the torn-tail rule keys on any declared environment, not a " &
         "literal",
-        verifyRun(tornProd).verdict == vIncomplete)
+        verifyRun(tornReal).verdict == vIncomplete)
 
 echo ""
 echo passes, " passed, ", failures, " failed"

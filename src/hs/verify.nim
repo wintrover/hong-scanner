@@ -409,7 +409,7 @@ proc provenanceOk(dir: string; recs: seq[Record]; bi: BuildInfo;
 
 proc declaredEnvironment(recs: seq[Record]): string =
   ## The operating environment the stream's config record declares
-  ## ("demo"/"prod"), "" when undeclared. A malformed config probes as ""
+  ## ("demo"/"real"), "" when undeclared. A malformed config probes as ""
   ## here on purpose: the core replays the config and reports the real
   ## failure, so this probe never reclassifies a verdict.
   if recs.len >= 2 and recs[1].kind == kConfig:
