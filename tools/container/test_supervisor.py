@@ -170,17 +170,76 @@ def advance_to(clock, h, m=0, s=0):
 class SupervisorTestBase(unittest.TestCase):
     """One mktemp sandbox per test; every supervisor is shut down on
     cleanup (all children reaped); supervisor log lines are captured,
-    not printed, and dumped on any failure."""
+    not printed, and dumped on any failure. A fail-closed orphan gate
+    runs last-but-one: after all teardowns no process may still
+    reference the sandbox — a survivor is killed deterministically
+    (SIGTERM, bounded wait, SIGKILL) and fails the test, because a
+    leaked child outlives the suite as a ppid=1 orphan holding every
+    inherited fd (2026-11-06 gate stall: a serve.py orphan held the
+    gate pipeline's stderr fd, so `tail` never saw EOF)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="hs-supervisor-test.")
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(self.assert_no_orphaned_sandbox_processes)
         self.logs = []
         patch = mock.patch.object(cs, "_emit",
                                   lambda line: self.logs.append(line))
         patch.start()
         self.addCleanup(patch.stop)
         self._write_fakes()
+
+    def assert_no_orphaned_sandbox_processes(self):
+        """Fail-closed orphan gate: /proc is scanned for any live
+        process whose argv still references this test's sandbox (the
+        mkdtemp path is unique to this run — other sessions' sandboxes
+        never match). Every survivor is stopped (SIGTERM, bounded wait,
+        SIGKILL) and then reported as a failure: killing alone would
+        hide the leak, and a leak is never a pass."""
+        marker = self.tmp.encode("utf-8")
+        mine = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open("/proc/%s/cmdline" % entry, "rb") as f:
+                    argv = [a for a in f.read().split(b"\0") if a]
+            except OSError:
+                continue
+            if any(marker in a for a in argv):
+                mine.append(int(entry))
+        for pid in mine:
+            self._stop_pid(pid)
+        self.assertEqual(mine, [], "sandbox processes survived teardown "
+                         "(killed above, reported as the leak they are): %s"
+                         % mine)
+
+    @staticmethod
+    def _stop_pid(pid):
+        """Deterministic single-process teardown: SIGTERM, bounded wait,
+        SIGKILL, bounded wait."""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if SupervisorTestBase._proc_gone(pid):
+                    return
+                time.sleep(0.05)
+
+    @staticmethod
+    def _proc_gone(pid):
+        """True once the process is reaped or zombie: a zombie has
+        already released its fds, so it cannot hold a pipeline open."""
+        try:
+            with open("/proc/%d/stat" % pid, "rb") as f:
+                data = f.read()
+        except OSError:
+            return True
+        tail = data.rpartition(b")")[2].split()
+        return not tail or tail[0] == b"Z"
 
     def _write_fakes(self):
         for name, body in (("fake_collector.py", FAKE_COLLECTOR),

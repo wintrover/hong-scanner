@@ -216,6 +216,12 @@ docker build -t <tag> [--label org.hongscanner.image-purpose=ci-test] "$CTX"
 - **재시작 소유권 분리: supervisor는 자식을, Northflank는 컨테이너를
   재시작한다.** 자식 수명은 supervisor의 내부 책임이고 어떤 프로브에도
   노출되지 않는다(아래 계약 A). 컨테이너 재시작 신호는 /live 503뿐이다.
+- API 자식은 **자기 세션/프로세스 그룹**에서 실행된다(`start_new_session`
+  스폰). 모든 정리 경로(정지·살아있는 자식 위의 재기동)는 그룹 전체에
+  SIGTERM → 유한 시간 대기 → 잔존 시 SIGKILL을 보내고 종료를 기다린다
+  — 살아있는 자식을 참조만 교체해 버리는 경로는 없다(2026-11-06 고아
+  누수: 버려진 serve.py가 ppid=1로 살아남아 상속한 stderr fd를 계속
+  붙잡아 테스트 게이트 파이프라인을 정체시켰다).
 - STOPSIGNAL SIGTERM: supervisor가 자식들을 드레인하고 exit 0으로
   끝난다(`docker stop` = 이 경로, 스위트가 실측한다).
 
