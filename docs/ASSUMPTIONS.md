@@ -210,6 +210,53 @@ still requires G2 credentials.
 - `websockets` `recv(decode=False)` returns the application payload bytes
   (text included) after fragment reassembly — the evidence boundary of
   REPLAY_CONTRACT.md §12.2.
+- Server split and separate credentials (official docs, collected
+  2026-11-06): ka10080 document — "운영 도메인 https://api.kiwoom.com /
+  모의투자 도메인 https://mockapi.kiwoom.com (KRX만 지원가능)"; WS 0B
+  document — "wss://api.kiwoom.com:10000 / wss://mockapi.kiwoom.com:10000
+  (KRX만 지원가능)"; the official `.env.example` names the four endpoints
+  PRD/MOCK/W_PRD/W_MOCK. 서비스 이용안내 — "키움증권은 실제 투자와
+  모의투자 App Key를 별도로 관리합니다." Operational and mock servers,
+  and their credentials, are separate by design.
+- Demo/real data-fidelity wording (official guide quotes, collected
+  2026-11-06 — the VS-F comparison basis): MCP guide (guideIndex/07) —
+  "이 글은 모의투자 환경을 기준으로 하며 조회 기능과 주문을 다룁니다.
+  **조회 데이터는 모의투자와 실전이 같습니다.**" Plugin guide
+  (guideIndex/09) — "…시세는 모의 서버 값이라 실제 시장 수치와 다를 수
+  있습니다." The two sentences have different subjects ("조회 데이터" vs
+  "시세"): reading 1 — 조회 데이터 as the REST snapshot scope with 시세 as
+  the narrower quote-value scope — is the best-supported reading of the
+  original structure, and no official document anywhere defines the scope
+  coordination of the two terms. Fidelity is therefore an API-by-API
+  experimental question and must never be settled from documentation
+  alone. 모의투자 이용안내 — "시세의 경우 고객 편의를 위해 모의투자
+  환경에서도 NXT 시세까지 제공드리고 있습니다"; an explicit guarantee that
+  the mock server's real-time 체결 (0B) is the actual market data verbatim
+  does not exist in any official document (checked — absent).
+- Official SDK demo constraint (2026-11-06): `DemoUnsupportedError`
+  (return code 8104) — the API exists but is unserved in demo; evidenced
+  examples: 환율 and 주문가능금액 queries rejected on demo.
+- ka10080 spec (official, collected 2026-11-06): POST /api/dostk/chart;
+  request stk_cd / tic_scope ("1:1분,3:3분,5:5분,10,15,30,45,60") /
+  upd_stkpc_tp (0 or 1) / base_dt (optional, YYYYMMDD); continuous paging
+  through the cont-yn / next-key headers; response `stk_min_pole_chart_qry`
+  LIST — cur_prc (sign included) · trde_qty · cntr_tm (YYYYMMDDHHmmss) ·
+  open/high/low_pric · pred_pre · pred_pre_sig · acc_trde_qty.
+- ka10027 spec (official, collected 2026-11-06): 국내주식>순위정보>
+  전일대비등락률상위요청, POST /api/dostk/rkinfo; request mrkt_tp
+  (000전체/001코스피/101코스닥) / sort_tp (1상승률~5보합) / trde_qty_cnd /
+  stk_cnd / crd_cnd / updown_incls / pric_cnd / trde_prica_cnd / stex_tp;
+  response `pred_pre_flu_rt_upper` LIST — stk_cls / stk_cd / stk_nm /
+  cur_prc / pred_pre_sig / pred_pre / flu_rt / sel_req / buy_req /
+  now_trde_qty / cntr_str / cnt; the response carries **no query-time
+  field**.
+- WS 0B spec (official, collected 2026-11-06): LOGIN
+  {"trnm":"LOGIN","token":…} · REG {"trnm":"REG","grp_no","refresh",
+  "data":[{item,type}]} · REMOVE; inbound {"trnm":"REAL","data":[{type:
+  "0B",name:"주식체결",item,values}]} — values: '10' 현재가 (부호포함) ·
+  '15' 거래량 ("+매수체결,-매도체결") · '20' 체결시간 (HHmmss) · '13'
+  누적거래량 · '14' 누적거래대금 · '290' 장구분 · '9081' KRX/NXT 구분;
+  the value set carries **no per-trade unique identifier field** (checked).
 
 ## Trust boundary
 
