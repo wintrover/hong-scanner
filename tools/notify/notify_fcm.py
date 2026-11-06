@@ -21,7 +21,16 @@ AGENTS.md §0.3 vendor-fact rule — the claims below are the vendor's:
   developers.google.com/identity/protocols/oauth2/service-account)
 - Error codes (firebase.google.com/docs/cloud-messaging/admin/errors):
   UNREGISTERED (HTTP 404) — remove the token from the app server and
-  stop sending to it; SENDER_ID_MISMATCH (HTTP 403) — the authenticated
+  stop sending to it. That table's UNREGISTERED is the semantic name;
+  the REST wire's error object carries google.rpc codes, whose
+  canonical name for 404 is NOT_FOUND, so the two names denote the
+  same retired-token state. Measured wire (2026-11-03 delivery
+  ledger, evidence in docs/GATES.md): an invalid token answered HTTP
+  404 with error.status "NOT_FOUND" — the string "UNREGISTERED" never
+  appeared on the wire, so classify_send retires on 404 + either name
+  (NOT_FOUND paired with any other HTTP status is NOT this state and
+  stays verbatim-permanent); SENDER_ID_MISMATCH (HTTP 403) — the
+  authenticated
   sender is not a registered sender of this token: a configuration
   error; QUOTA_EXCEEDED (HTTP 429) — exponential backoff, minimum
   initial delay of 1 minute; UNAVAILABLE (HTTP 503) — retry the same
@@ -437,7 +446,19 @@ def classify_send(status, headers, body_bytes):
             error_code = vstatus  # verbatim, the set is open
 
     retry_after = _parse_retry_after(headers)
-    if status == 404 and error_code == "UNREGISTERED":
+    # 404 retires the token under either code name: the Admin SDK
+    # error table spells it UNREGISTERED ("remove this registration
+    # token from the app server and stop using it",
+    # firebase.google.com/docs/cloud-messaging/admin/errors), while
+    # the REST wire's error object carries google.rpc codes whose
+    # canonical name for 404 is NOT_FOUND — the same state, two names.
+    # Measured wire (2026-11-03 delivery ledger, docs/GATES.md
+    # evidence log): an invalid token answered 404 with error.status
+    # "NOT_FOUND"; "UNREGISTERED" never reached the wire, so matching
+    # it alone left real invalid tokens unretired. NOT_FOUND with any
+    # status other than 404 is NOT this state: it falls through to
+    # the verbatim permanent class below, never a guessed retirement.
+    if status == 404 and error_code in ("UNREGISTERED", "NOT_FOUND"):
         return SendOutcome("unregistered", status,
                            error_code=error_code,
                            retry_after_seconds=retry_after)

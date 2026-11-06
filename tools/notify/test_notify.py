@@ -829,6 +829,28 @@ class TestTransport(Base):
             404, {}, b'{"error":{"code":404,"status":"UNREGISTERED"}}')
         self.assertEqual((unregistered.kind, unregistered.error_code),
                          ("unregistered", "UNREGISTERED"))
+        # The measured REST wire form (2026-11-03 delivery ledger,
+        # docs/GATES.md evidence log): an invalid token answers 404
+        # with error.status "NOT_FOUND" — the google.rpc canonical
+        # name for 404 — not the Admin-SDK error table's UNREGISTERED
+        # spelling. Both names denote the same retired-token state.
+        wire_unregistered = notify_fcm.classify_send(
+            404, {}, b'{"error":{"code":404,"status":"NOT_FOUND"}}')
+        self.assertEqual((wire_unregistered.kind,
+                          wire_unregistered.error_code),
+                         ("unregistered", "NOT_FOUND"))
+        # NOT_FOUND is the retired-token state ONLY when paired with
+        # HTTP 404: under any other status it is an unknown code, kept
+        # verbatim and permanent — never a guessed retirement.
+        other_not_found = notify_fcm.classify_send(
+            400, {}, b'{"error":{"code":400,"status":"NOT_FOUND"}}')
+        self.assertEqual((other_not_found.kind, other_not_found.error_code),
+                         ("permanent", "NOT_FOUND"))
+        # And a 404 carrying any other code is not a retirement either.
+        odd_404 = notify_fcm.classify_send(
+            404, {}, b'{"error":{"code":404,"status":"SOME_OTHER_CODE"}}')
+        self.assertEqual((odd_404.kind, odd_404.error_code),
+                         ("permanent", "SOME_OTHER_CODE"))
         mismatch = notify_fcm.classify_send(
             403, {}, b'{"error":{"code":403,'
                      b'"status":"SENDER_ID_MISMATCH"}}')
@@ -1023,6 +1045,47 @@ class TestDispatcher(Base):
         self.assertEqual(record["error_code"], "UNREGISTERED")
         # The registry retired the token (hash only) — a second sweep
         # has no active device left and must not send again.
+        registry = notify_ledger.Registry(self.registry_path, lock=False)
+        try:
+            self.assertEqual(registry.devices(), {})
+        finally:
+            registry.close()
+        second = self.dispatcher(cfg, transport)
+        try:
+            second.sweep()
+        finally:
+            second.close()
+        self.assertEqual(transport.send_count(), 1)
+
+    def test_404_not_found_wire_form_fails_and_retires_the_token(self):
+        """The regression the 2026-11-03 live wire exposed: an invalid
+        token answers HTTP 404 with error.status "NOT_FOUND" (the
+        google.rpc canonical name for 404), not the Admin-SDK error
+        table's UNREGISTERED spelling. The old single-name match
+        classified that as a plain permanent FAILED, so the token
+        stayed active in the registry forever (no token_invalid, every
+        later send failing). The wire form must take the same
+        retirement path as UNREGISTERED."""
+        _, cfg = self.config()
+        self.write_service_account(cfg)
+        self.seed_ledger(cfg, [make_event()])
+        self.register("dev-1")
+        transport = FakeTransport(send_responses=[
+            FakeResponse(404, {"error": {"code": 404,
+                                         "status": "NOT_FOUND"}}),
+        ])
+        first = self.dispatcher(cfg, transport)
+        try:
+            code = first.sweep()
+        finally:
+            first.close()
+        self.assertEqual(code, 0)
+        record = self.delivery_records(cfg)[0]
+        self.assertEqual(record["state"], "FAILED")
+        self.assertEqual(record["error_code"], "NOT_FOUND")
+        self.assertEqual(first.counts.get("token_retired"), 1)
+        # Retired in the registry (hash only), not left active: the
+        # second sweep has no device left and must not send again.
         registry = notify_ledger.Registry(self.registry_path, lock=False)
         try:
             self.assertEqual(registry.devices(), {})

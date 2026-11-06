@@ -128,8 +128,8 @@ Python register 프로세스 (notify_register.py)
   최신 기록이 이긴다. token_invalid는 토큰의 sha256 접두어만 담는다 —
   원시 토큰은 절대 재기록되지 않는다.
 - 활성 기기 = 마지막 기록이 device인 기기(token_invalid가 뒤를 잇으면
-  은퇴). dispatcher는 활성 기기에만 보내고, UNREGISTERED를 받으면 그
-  토큰을 은퇴시킨다(§5).
+  은퇴). dispatcher는 활성 기기에만 보내고, 404 응답(§5의 UNREGISTERED
+  /NOT_FOUND)을 받으면 그 토큰을 은퇴시킨다.
 - 등록(notify_register.py): 설정의 register_bearer_file과 `--bearer`
   (또는 $HSNOTIFY_BEARER)를 상수시간 비교(hmac.compare_digest)로
   검증한다. 불일치 시 아무 것도 기록하지 않고 토큰을 폐기한다. FCM
@@ -147,11 +147,22 @@ Python register 프로세스 (notify_register.py)
 | 429 QUOTA_EXCEEDED | retry | PENDING 기록, 대기 ≥ max(retry_min_seconds, Retry-After) — 벤더 최초 지연 최소 1분이 라이브 기본값 |
 | 503 UNAVAILABLE / 500 INTERNAL | retry | PENDING 기록, Retry-After 존중 (Retry-After 헤더가 있으면 그 값) |
 | 전송 실패(응답 자체가 없음) | retry | PENDING 기록 `HS_TRANSPORT` |
-| 404 UNREGISTERED | terminal | FAILED 기록 + 레지스트리 token_invalid(해시만) — 벤더 지시: 토큰을 제거하고 전송을 멈춘다 |
+| 404 UNREGISTERED **또는** NOT_FOUND | terminal | FAILED 기록(error_code 원문 보존) + 레지스트리 token_invalid(해시만) — 벤더 지시: 토큰을 제거하고 전송을 멈춘다 |
 | 403 SENDER_ID_MISMATCH | terminal | FAILED 기록 + stderr 명시 오류 + **exit 3** — 설정 오류는 fail-closed, 재시도 없음, 나머지 기기는 계속 서빙 |
 | 그 외 전부 (400, 401, 418, …) | permanent | FAILED, 오류 코드 **원문 보존** (집합은 열려 있고, 알 수 없는 코드는 성공·재시도로 지도되지 않는다) |
 | 페이로드 > 4096바이트 | permanent | 전송 전 거부, FAILED `HS_PAYLOAD_OVER_LIMIT` |
 
+- **404의 두 이름은 같은 상태다**: FCM 오류 표(firebase.google.com/
+  docs/cloud-messaging/admin/errors)는 무효 토큰을 UNREGISTERED
+  (HTTP 404, "remove this registration token from the app server and
+  stop using it")로 부르고, REST wire의 error 객체는 google.rpc
+  코드명을 쓴다 — 404의 canonical 코드명은 NOT_FOUND다. 실측
+  wire(2026-11-03 delivery ledger, docs/GATES.md 증거 로그): 무효
+  토큰 전송에 **HTTP 404 + `error.status "NOT_FOUND"`**로 답했고
+  "UNREGISTERED" 문자열은 wire에 오지 않았다. 따라서 404는 두 코드명
+  어느 쪽이든 은퇴 경로로 분류한다. **NOT_FOUND가 404가 아닌 다른
+  HTTP 상태와 함께 오면 이 상태가 아니다** — 그 외 전부 행의 원문
+  permanent 분류를 유지한다(잘못된 은퇴 추측 금지).
 - `HS_` 접두사는 스캐너 합성 코드다(전송 전 거부·전송 불능). 그 외
   error_code는 벤더 응답의 `error.status` 원문이며, 없으면
   `HTTP_<status>`다.
@@ -295,8 +306,9 @@ Python register 프로세스 (notify_register.py)
   - **B** SEND 마커 관측 후 SIGKILL → 전달 기록 부재 확인 → 재시작
     재전송 → ACCEPTED (솔직한 중복의 와이어 증거: 동일 쌍 SEND 2회);
   - **C** 429(Retry-After 존중, 와이어 타임스탬프 간격 ≥1s, PENDING
-    →ACCEPTED attempts 1→2) / 404(FAILED UNREGISTERED + 레지스트리
-    token_invalid 해시만, 재실행 무전송) / 403(FAILED
+    →ACCEPTED attempts 1→2) / 404 두 코드명 모두(실측 wire 형태
+    NOT_FOUND와 오류 표 형태 UNREGISTERED 각 1기기 — FAILED 기록 +
+    레지스트리 token_invalid 해시만, 재실행 무전송) / 403(FAILED
     SENDER_ID_MISMATCH + exit 3, 타 기기 계속 서빙) + 재실행 0 전송;
   - **D** 저장소 안 registry_path 거부(exit 2), 잘못된 bearer 등록 0건.
   증거는 `runs/drill-fcm-<ts>/`(gitignored): wire 로그, dispatcher
@@ -355,8 +367,10 @@ Python register 프로세스 (notify_register.py)
   지속), shrink LedgerFault, watch_poll_seconds 검증, SIGTERM 정상
   종료 + 재기동 멱등(서브프로세스), android.priority 매핑.
 - 실 FCM 실측 전체: 실 프로젝트에서의 429 Retry-After 실측 값,
-  404/403 실측 본문 형상(오류 표는 2026-10-28 갱신본과 대조됐으나
-  실측은 별도다), message_id 실측 형상, 실 토큰 수명.
+  403 실측 본문 형상, message_id 실측 형상, 실 토큰 수명. 404 본문
+  형상은 2026-11-03 실측됐다(HTTP 404 + `error.status "NOT_FOUND"`,
+  docs/GATES.md 증거 로그 — §5의 두 코드명 은퇴 분류 근거; 404
+  이외 상태의 NOT_FOUND는 실측된 바 없고 permanent로 남는다).
 - OAuth 실측: 서비스 계정 JWT 교환의 실측 응답(expires_in 형상),
   token_command 경로의 실제 gcloud 출력 형상.
 - 상주 worker의 실측: 세션 런처(`tools/run_session.sh`) 경유 기동·
