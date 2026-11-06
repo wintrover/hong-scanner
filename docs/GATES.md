@@ -279,6 +279,15 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-06, 재관측): 본 관측으로 직전 항목의 "실본 APK 재설치·기동 관측 NOT-MEASURED"는 해소됐다 — 실본 구성으로 빌드·설치·기동·4화면 전부 실측되었으며 심야 관측과 동일 결과다. 재관측 중 2회의 dump가 일시적으로 `com.android.systemui`(상태바/전환 과도기)를 담은 것은 관측 도구 타이밍이며 재시도로 해소됐다(원문 보존). no-data·HTTP 오류 화면·Timeline 행 출처 표시(session_id·data_quality)·P9·P11·P12·FCM 토큰 재등록(사용자 조치) 한계는 기존 그대로 유지된다. 본 항목 변경은 docs/GATES.md 기록·관측 산물뿐(추적 코드 수정 0줄 — 본 PR은 docs-only).
 
+### Evidence log (2026-11-06, 오전 토큰 등록·운영 관찰) — FCM 토큰 재등록(운영자 제공)·운영 LAN API 장애 관찰
+
+| gate | observed |
+|---|---|
+| 관측(토큰 재등록) | 운영자가 Overview 카드에 표시된 신규 FCM 토큰을 제공(2026-11-06 재관측 실본 APK의 Firebase 초기화로 획득). 등록 실행: `echo '<token>' | python3.13 tools/notify/notify_register.py --config ~/.local/share/hongscanner/notify/notify_config.json --device-id wuyoni-sm-g977n --token-file - --bearer <register_bearer_file에서 읽은 값, 미출력>` → **exit 0**, 출력 `registered device=wuyoni-sm-g977n token=sha256:5bd70bcdbc1c588e registry=/home/wintrover/.local/share/hongscanner/notify/devices.jsonl`(토큰 원문은 프로세스 메모리·레지스트리 외 기록 없음). 재등록은 `add_device` 계약의 갱신 경로(append). **전달 실측은 다음 이벤트 대기**: 운영 ledger 14건·delivery 14쌍(13 ACCEPTED·1 FAILED) — 미전달 쌍 0, FAILED는 종단(재시도 금지)이므로 신규 토큰의 실제 FCM 수용 여부(ACCEPTED/거부)는 다음 발화에서 측정된다. 상주 dispatcher worker는 현재 구동 중 아님(2026-11-03 관측은 그 세션에서 수동 기동·중지) |
+| 관찰(운영 LAN API 장애 — 별도 이슈) | `hongscanner-api.service`(user systemd, "Hong Scanner read-only record API (LAN 192.168.0.7:8080)", enabled)이 `status=200/CHDIR`로 crash-loop 중 — ExecStart가 `/home/wintrover/바탕화면/hs-wt-attfix/tools/api/serve.py --runs /home/wintrover/바탕화면/HongScanner/runs --ledger …/notify/ledger.hcj.jsonl --delivery …/notify/delivery.hcj.jsonl --port 8080 --bind 192.168.0.7`을 가리키는데 작업 디렉터리·runs 경로가 저장소 재배치(디렉터리 삭제)로 소멸. journal 원문: "Changing to the requested working directory failed: No such file or directory", 재시작 카운터 27012(약 4-5초 간격 → 장애 시작은 본 관측 슬라이스 이전). 본 관측 서버(127.0.0.1:8080, PID 2884203)와는 무관 — CHDIR 실패가 bind 이전에 발생하고 bind 주소도 다르다. 수리(유닛 경로 갱신) 또는 비활성화는 운영 결정 사항으로 본 기록과 분리 — 여기엔 관찰 원문만 보존 |
+
+한계(2026-11-06, 토큰 등록): 신규 토큰의 FCM 수용(전달 ACCEPTED)은 아직 미측정 — 측정 기회는 다음 실제 이벤트 발화 시이며, 그때까지 "등록됨(레지스트리 append 실측)"이 유일한 확정 사실이다. 토큰 값 자체는 저장소·GATES에 기록하지 않는다(계약 §8). LAN API 장애의 수리 여부·방식은 운영자 결정이며 본 기록은 판정이 아니라 관찰이다. 본 항목 변경은 docs/GATES.md 기록뿐(추적 코드 수정 0줄 — 본 PR은 docs-only).
+
 ## Completion Evidence
 
 ```bash
