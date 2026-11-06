@@ -288,6 +288,12 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-06, 토큰 등록): 신규 토큰의 FCM 수용(전달 ACCEPTED)은 아직 미측정 — 측정 기회는 다음 실제 이벤트 발화 시이며, 그때까지 "등록됨(레지스트리 append 실측)"이 유일한 확정 사실이다. 토큰 값 자체는 저장소·GATES에 기록하지 않는다(계약 §8). LAN API 장애의 수리 여부·방식은 운영자 결정이며 본 기록은 판정이 아니라 관찰이다. 본 항목 변경은 docs/GATES.md 기록뿐(추적 코드 수정 0줄 — 본 PR은 docs-only).
 
+### Evidence log (2026-11-06, 오전 branch protection 실측) — ruleset·구형 보호 모두 플랜 제한(403) 확정: 기술적 merge 강제는 현재 플랜에서 존재 불가
+
+| gate | observed |
+|---|---|
+| 관측(규칙 API 403) | `gh api repos/wintrover/hongscanner/rulesets` → 403 원문: `Upgrade to GitHub Pro or make this repository public to enable this feature.`(docs.github.com/rest/repos/rules#get-all-repository-rulesets). 구형 보호도 동일: `gh api repos/wintrover/hongscanner/branches/main/protection`·`.../protection/required_status_checks` → 각각 403 동일 원문(rest/branches/branch-protection). 즉 이 private 저장소(현 플랜)에서는 ruleset·required check·직접 push 차단이 API 계층에서 생성·조회 자체가 불가하다 — "보호 규칙이 약하게 설정돼 있다"가 아니라 **기능 부재**가 실측됐다. 따라서 기존 한계 문구의 "branch protection 실효성은 UNKNOWN"은 **"기술적 강제 계층이 플랜 제한으로 부재(실측)"**로 정정된다: merge 권위는 지금도 유일하게 "CI 런 로그 마커 실측 후 merge하는 운영자 수동 통제"(기존 GATES 기술 그대로)다. AGENTS §2.1의 GitHub ruleset 권위 설계는 플랜 변경 시에만 기술적으로 실현 가능하다. 참고: attest 증명 저장 제한(동일 403 계열 원문 "make this repository public")과 근원이 같다 — 저장소 공개 전환(또는 Pro/GHEC) 시 두 기능이 함께 해금된다. 해법 선택은 운영자 결정(본 기록은 판정 아님) |
+
 ## Completion Evidence
 
 ```bash
