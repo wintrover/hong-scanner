@@ -118,7 +118,9 @@ class _EventRow extends StatelessWidget {
           '${event.rank == null ? '' : ' #${event.rank}'}',
         ),
         subtitle: Text(
-          '${event.observedAt ?? '?'} · ${event.severity ?? '?'} · 전달: $deliveryBadge',
+          '${event.observedAt ?? '?'} · ${event.severity ?? '?'} · 전달: $deliveryBadge\n'
+          'session_id: ${event.sessionId ?? '?'} · '
+          'data_quality: ${event.dataQuality ?? '?'}',
         ),
         trailing: const Icon(Icons.chevron_right),
       ),
