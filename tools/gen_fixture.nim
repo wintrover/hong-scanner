@@ -41,13 +41,12 @@ proc calendarRaw(): HcjValue =
 proc configRaw(): HcjValue =
   hObj(
     ("params", hObj(
-      ("lookback", hInt(3)),
-      ("pullback_min_bp", hInt(50)),
-      ("rebound_min_bp", hInt(50)),
-      ("recovery_bp", hInt(30)),
-      ("breakdown_bp", hInt(30)),
-      ("warmup_bars", hInt(0)),
-      ("hold_on_degraded", hBool(true)))),
+      ("countermove_min_bp", hInt(50)),
+      ("directional_trigger_bp", hInt(30)),
+      ("hold_on_degraded", hBool(true)),
+      ("lookback_bars", hInt(3)),
+      ("trend_min_bp", hInt(50)),
+      ("warmup_bars", hInt(0)))),
     ("session_date", hStr(sessionDate)))
 
 proc tick(symbol: string; barIdx: int; price: int64; vol: int64): HcjValue =
@@ -62,31 +61,35 @@ proc gapRaw(): HcjValue =
 proc baseTicks(): seq[HcjValue] =
   ## Time-ordered stream: bar 0 .. bar 10, both symbols per bar.
   ## 005930: rise to bar 5, pull back to bar 8, reversal at bar 9.
-  ## 000660: fall to bar 5, rebound to bar 7, breakdown at bar 9.
+  ## 000660: the exact mirror of 005930 around the declared reference
+  ## 10100 (P -> 2*10100 - P, equal-magnitude opposite moves): fall to bar 5,
+  ## rebound to bar 8, breakdown at bar 9. The symmetric engine must emit
+  ## bearish_rebound_failure for 000660 at the same bar index where 005930
+  ## gets bullish_pullback_reversal (§6 mirror acceptance).
   result.add tick("005930", 0, 10000, 100)
-  result.add tick("000660", 0, 20000, 5000)
+  result.add tick("000660", 0, 10200, 5000)
   result.add tick("005930", 1, 10100, 200)
-  result.add tick("000660", 1, 19800, 5001)
+  result.add tick("000660", 1, 10100, 5001)
   result.add tick("005930", 2, 10200, 300)
-  result.add tick("000660", 2, 19600, 5002)
+  result.add tick("000660", 2, 10000, 5002)
   result.add tick("005930", 3, 10300, 400)
-  result.add tick("000660", 3, 19400, 5003)
+  result.add tick("000660", 3, 9900, 5003)
   result.add tick("005930", 4, 10400, 500)
-  result.add tick("000660", 4, 19200, 5004)
+  result.add tick("000660", 4, 9800, 5004)
   result.add tick("005930", 5, 10500, 600)
-  result.add tick("000660", 5, 18800, 5005)
+  result.add tick("000660", 5, 9700, 5005)
   result.add tick("005930", 6, 10400, 700)
-  result.add tick("000660", 6, 19000, 5006)
+  result.add tick("000660", 6, 9800, 5006)
   result.add tick("005930", 7, 10300, 800)
-  result.add tick("000660", 7, 19100, 5007)
+  result.add tick("000660", 7, 9900, 5007)
   result.add tick("005930", 8, 10200, 900)
-  result.add tick("000660", 8, 19050, 5008)
+  result.add tick("000660", 8, 10000, 5008)
   result.add tick("005930", 9, 10250, 950)
   result.add tick("005930", 9, 10450, 1000)
-  result.add tick("000660", 9, 18850, 5009)
-  result.add tick("000660", 9, 18400, 5010)
+  result.add tick("000660", 9, 9950, 5009)
+  result.add tick("000660", 9, 9750, 5010)
   result.add tick("005930", 10, 10440, 1100)
-  result.add tick("000660", 10, 18900, 5011)
+  result.add tick("000660", 10, 9760, 5011)
 
 proc linesText(lines: seq[string]): string =
   for l in lines: result.add(l & "\n")
