@@ -11,6 +11,10 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
 보존된 입력·설정·캘린더·빌드로 제3자가 동일한 봉과 신호를 재생성할 수 있다.
 `provenance=OK`는 자체 보고한 메타데이터의 일치만 뜻하며 빌드 출처를
 독립적으로 증명하지 않는다. 합성 VS-1 통과는 실측 운영의 완료가 아니다.
+관측 범위는 선언된 후보 유니버스(방향별 응답 순서 상위 100, P8)에
+한정된다. 상승·하락은 하나의 대칭 판정 계약(P23)으로 탐지하며,
+LIVE·BACKFILL 출처와 세션 모드를 구분해 기록하고 부분 관측을 전체
+성공으로 승격하지 않는다(P21/P22).
 
 ## In Scope
 
@@ -19,6 +23,11 @@ canonical `main`에서 빌드한 바이너리로 실제 시장 런이 매 거래
   provenance 5종 대조, CI(합성 전용), GitHub merge gate, canonical main 빌드.
 - Phase-0 컨테이너 계약: 단일 컨테이너 이미지·cloud supervisor·attest
   공급망(2바이너리·이미지 digest 증명) — tools/container/README.md.
+- VS-A 운영 계약 동결(2026-11-06): 출처·세션 모드·디스패치 결과 축 분리,
+  대칭 판정 계약, 계약 버전·same-commit 재생 원칙, 달력 승인 3층 증거
+  (ASSUMPTIONS P21~P25, REPLAY_CONTRACT §6/§7/§11/§12.1/§12.8). 구현은
+  VS-1(대칭 엔진) → VS-2A(실전 LIVE) → VS-2B(ka10080 BACKFILL) →
+  VS-2C(CLOSE_RECONCILIATION·LATE_START) → VS-3(systemd) 순서로.
 
 ## Explicitly Out of Scope
 
@@ -162,7 +171,7 @@ P12(승인)의 조건은 이 사다리와 무관하게 그대로 유지된다.
 | gate | observed |
 |---|---|
 | 모바일(FCM) | PR #26(`b36438d`, firebase_messaging 17.x register/onRegistered 전환+handoff 감사 수정)·PR #27(`97043fd`, FcmPushService 연동, handoff 3–4단계). merge push: ci·mobile 전부 success(#26 ci `41365171169`·mobile `41365171168`; #27 ci `41375249160`·mobile `41375249153`). **#27의 attest `41375249185`는 실패 — `BUILD REFUSED: origin is not wintrover/hong-scanner`(fail-closed, 미설치)** → PR #28(`8e1f38b`, MainActivity 추가·canonical repo 고정)로 해소: 8e1f38b ci `41377299181`·mobile `41377299260`·attest `41377299196` 전부 success. 루트 hongscanner.md·./hongscanner 미변경 |
-| FCM(실기기·실전송) | 사용자 휴대폰(wuyoni-sm-g977n) 연결·APK 설치·알림 허용·실알림 표시 관측. 오전 실전송 2건 HTTP 200 ACCEPTED(provider_message_id `0:1793586953353610%2e19e6a12e19e6a1`·`0:1793587274008383%2e…`, dedup_suppressed=1). 기기 표시 실측: `dumpsys notification` numPostedByApp=1, tag `FCM-Notification:5882277959`. 기기 등록: 레지스트리 토큰 `eHrUEWnOSQC7f0S-5Qbn4N`(11:34:22). 전달 ledger(`~/.local/share/hongscanner/notify/delivery.hcj.jsonl`) 총 12건 ACCEPTED, 전부 attempts=1·provider_message_id 확보 — **PROVIDER_ACCEPTED≠실기기 표시 경계 유지, 표시는 별도 관측(dumpsys·사용자 확인)** |
+| FCM(실기기·실전송) | 사용자 휴대폰(wuyoni-sm-g977n) 연결·APK 설치·알림 허용·실알림 표시 관측. 오전 실전송 2건 HTTP 200 ACCEPTED(provider_message_id `0:1793586953353610%2e19e6a12e19e6a1`·`0:1793587274008383%2e…`, dedup_suppressed=1). 기기 표시 실측: `dumpsys notification` numPostedByApp=1, tag `FCM-Notification:5882277959`. 기기 등록: 레지스트리 토큰 `sha256:28469acf88724c75`(11:34:22, 값 마스킹 11-06 — 해당 토큰은 11-03 404 NOT_FOUND 무효화[11-03 전달 관측 로그]). 전달 ledger(`~/.local/share/hongscanner/notify/delivery.hcj.jsonl`) 총 12건 ACCEPTED, 전부 attempts=1·provider_message_id 확보 — **PROVIDER_ACCEPTED≠실기기 표시 경계 유지, 표시는 별도 관측(dumpsys·사용자 확인)** |
 | VS-3(상주 워커) | PR #29(`d787b37`, notify-watch): `tools/notify/dispatcher.py --watch`(1초 폴·완성된 LF 라인만·재시작 전수 재탐색 event_id 멱등·백오프 중 신규 이벤트 논블로킹 처리·배치 ingest)·`tools/run_session.sh`(세션 런처 — Collector+Worker 동시 기동·transient 관리·달력 절대경로·notify-config 사본)·collector fsync-before-publish(이벤트 공개 전 원본 입력 fsync). 근거: 오전 관측 "수집이 다 끝나야 알림" — 일회성 CLI 실행 주체 부재(ingest 실행 주체 UNKNOWN 해소). 게이트 `/tmp/gate-notify-watch.log` exit 0+마커. watch 드릴 `runs/drill-watch-20261102-133335`(4시나리오). CI 2런(pull_request `41390111109`·push `41390042671`) 마커 각 1. **attach 실측 `runs/attach-worker-20261102-1353`: 병합 워커가 라이브 PH-1 (2) events 파일 tail — 첫 틱 1,746-이벤트 백로그 ingest, 이후 ~20초 이벤트 쌍이 1초 폴 내 ingest(observed_at→ingest 0–1초, 중앙값 0초, n=20), 171틱, SIGTERM 정지 exit 0** |
 | P13(d787b37) | main `d787b37`(PR #29 merge) push: ci `41390719711`·attest `41390719697` success. INSTALL VERIFY OK → `versions/0.1.0-main-d787b37`(sha256 `2a67b63e…`), current 원자 전환. smoke `runs/smoke-2026-11-02-d787b37`: `REPLAY OK bars=22 signals=8 events=1 frames=24`·`VERDICT MATCH provenance=OK`·`EVENTS=6a51940f…` exit 0 — 5빌드 교차 결정론 유지 |
 | WS 경로(#30) | **라이브 WS 최초 연결 확정**: 세션 -c(14:58, `9707d2c` pre-merge) — `wss://mockapi.kiwoom.com:10000/api/dostk/websocket` 접속, LOGIN ACK return_code=0·conn open·서버 PING 수신·0s/0B REG ACK, REST ka10027 실데이터(상승: 영광 +32.35% 등, 하락: CJ씨푸드1우 −48.00% 등). 근본원인: 수거체가 경로 없이 루트에 접속(루트 업그레이드 무응답; TCP·TLS1.3·Kiwoom EV 인증서는 정상) — 공식 kwcli SDK는 `base+api_url` 합성, ka10171~73이 `/api/dostk/websocket` 사용. 14:40 라이브 LOGIN 프로브도 pre-merge로 성공(clean close 1000). PR #30(`a660689`, sidecar `DEMO_WS_ENDPOINT`+Nim `demoWsEndpoint`+fakesite expected 동기). CI 2런(`41396140493`·`41396197632`) 마커 각 1. -c의 FCM 3건 200(event 48e0f249·011fd251·a479daa2, 14:58) — **수집 세션 도중 실시간 전송 관측** |
@@ -307,6 +316,17 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-06, 오후): FID "다음 발화 ACCEPTED"는 예상이며 실측은 다음 실제 이벤트 발화 시 측정된다(현재 확정 사실은 레지스트리 append 실측뿐). 은퇴 수정의 실 wire 검증 역시 다음 무효 토큰 사건 대기(드릴 34/34는 합성 검증). "404+NOT_FOUND==UNREGISTERED"를 직접 명문화한 공식 문장은 발견되지 않았다 — 매핑은 공식 오류표(UNREGISTERED=HTTP 404, "remove this registration token from the app server and stop using it")+11-03 실측 wire의 조합 근거다. GATES:165 평문 토큰은 보고만(정정 여부 운영자 결정, 본 기록은 값 미재인용). Timeline 행의 session_id·data_quality 미표출 한계는 유지(Event Detail에서만 가시). 플래키 잔여 2건(23:59:00 직전 watchdog 우선 종료 갭·빈 supervisor log dump)은 범위 밖 기록. post-merge attest는 57356d3 레이스 거부·130e124 플랫폼 제한 재현으로 main 증명·이미지 산출은 계속 차단(BLOCKED 유지, 해법 선택은 운영자). 본 항목의 코드 변경은 PR #58(테스트 전용)·PR #59(Python 도구) 2건이며 둘 다 바이너리 입력 불변 — 설치 current는 bd28355 유지.
 
+### Evidence log (2026-11-06, 오후 2) — VS-A 운영 계약 동결·토큰 마스킹·달력 복원·서비스 정리(운영자 승인 하)
+
+| gate | observed |
+|---|---|
+| 서비스 정리 | `systemctl --user disable --now hongscanner-api.service` + `reset-failed` → `is-enabled=disabled`·`is-active=inactive` 실측(wants에서 제거 확인). unit 파일·journal 보존. 루프백 관측 인스턴스(serve.py 개별 프로세스·adb reverse 경로)는 무관·유지 |
+| 달력 복원 | 휴지통 원본 2건(`krx-2026q4.json`·`krx-2027.json`) → `~/.local/share/hongscanner/calendars/` 복사. 무결성: sha256 ≡ `CALENDAR_INDEX.sha256`(05dee867…·1d9c6c2d…) 완전 일치 실측. 출처: `python3.13 tools/check_calendar_source.py --calendars ~/.local/share/hongscanner/calendars` → MATCH 2·SKIP 2·`CALENDAR_SOURCE CHECK RESULT=ALL_MATCH` exit 0(KRX 공개 응답 SHA-256 대조). 승인: 본 PR의 운영자 승인으로 적용 범위(2026Q4·2027) 기록 — P25 3층 증거 첫 적용. 기존 runs/ 증거 이동·삭제 없음(canonical 경로는 이후 세션부터) |
+| 토큰 마스킹 | GATES:165(11-02 행)의 22자 평문 토큰 — 전 저장소 바이트 스캔에서 해당 위치 유일(11-06 병렬 사이클 보고) — 을 `sha256:28469acf88724c75`(원문 SHA-256 선두 16hex)로 치환, 무효화 사실(11-03 404 NOT_FOUND)·발생 일시 보존. GATES:302가 남긴 '운영자 결정'을 운영자 지시(현행만 정정·history 불시행 — 이미 무효화된 토큰에 대한 전체 이력 재작성 비용)로 실행. 값 재인용 없음 |
+| VS-A 계약 | ASSUMPTIONS P21~P25(origin 2값 축·세션 모드/디스패치 결과 분리·대칭 판정 계약·계약 버전·same-commit 재생·달력 3층)·REPLAY_CONTRACT §6 대칭 동결+§6.1 레거시·§7 `origin`/`contract_version`·§11 달력 권위·§12.1 subscription truncation 동등 조항·§12.8 데이터 생명주기 신설·GATES Terminal Outcome/PH-1/Approval 정밀화. 반박 검증(병렬 서브에이전트): 재생은 same-commit 설계(§8 검사 1)이므로 신규 필드는 선택+선언 기본값 원칙(`environment`/`repoll_seconds` 선례)으로만 기존 봉인 런이 보존된다 — run.json에 바이너리 digest·계약 버전이 없던 현황도 확인. ruleset 26109780 유지·probe 없음(11-06 오전 실측 재인용) |
+
+한계: 본 PR은 계약 동결(docs+기록)이며 VS-1(대칭 엔진)·VS-2A/2B/2C(생명주기) 구현 전이다 — §6 신계약·§12.8·`origin`/`contract_version`/`session_mode` 필드의 생산자는 아직 없다(LIMITS 갱신). 본 merge의 post-push attest 런이 공개 전환 후 첫 증명-저장 측정이며, 성공 전 신규 바이너리 설치·운영 전환은 금지다.
+
 ## Completion Evidence
 
 ```bash
@@ -378,10 +398,11 @@ sidecar + collector core)가 계약 스위트와 함께 구현·merge됐다. 단
 
 ## PH-1 / PH-2
 
-- **PH-1(교정)**: 실측 캡처 한 세션으로 전략 의존 구간(`warmup`,
-  `lookback`)과 임계값(`pullback_min_bp`, `recovery_bp`, `rebound_min_bp`,
-  `breakdown_bp`의 적용 규칙 포함)을 동결한다. 동결 전 값은 합성 픽스처
-  유래이며, 교정에 쓴 세션의 신호는 검출 증거로 함께 쓸 수 없다.
+- **PH-1(교정)**: 실측 캡처 한 세션으로 공통 파라미터(`warmup_bars`,
+  `lookback_bars`, `trend_min_bp`, `countermove_min_bp`,
+  `directional_trigger_bp` — P23 대칭 계약)를 동결한다. 방향별 분리
+  임계값은 존재하지 않는다. 동결 전 값은 합성 픽스처 유래이며, 교정에
+  쓴 세션의 신호는 검출 증거로 함께 쓸 수 없다.
 - **PH-2(평가)**: 동결된 config로 PH-1과 별개 세션을 실행한다. 결과는
   `signals observed` 또는 `NO_TRIGGER_OBSERVED` 둘 중 하나다.
 - 둘 다 BLOCKED(G2) — 실측 연결 경로는 2026-11-02부터 존재한다(라이브 WS
@@ -394,10 +415,15 @@ sidecar + collector core)가 계약 스위트와 함께 구현·merge됐다. 단
 provenance=OK`도 운영 승인이 아니다. 각 런의 승인에는 아래 조건이 모두
 필요하다:
 
-1. 승인된 달력 스냅샷과 세션 범위가 유효하다.
+1. 승인된 달력 스냅샷과 세션 범위가 유효하다 — 달력 승인은 3층 증거
+   (P25: 출처 일치·INDEX 무결성·운영자의 명시적 승인과 적용 범위)로
+   성립하며, 해시 일치나 복원본의 바이트 동일성만으로 승인이 아니다.
 2. 양방향 후보 조회가 선언된 범위와 페이지 정책에 따라 완료됐으며,
    벤더 오류나 미완료 조회가 성공으로 오인되지 않았다.
-3. 미해결 gap, 닫힌 봉에 늦게 도착한 틱, 필수 구독의 미확인 상태가 없다.
+3. 미해결 gap, 닫힌 봉에 늦게 도착한 틱, 필수 구독의 미확인 상태가 없다 —
+   선언된 범위 제한(P8 상한의 `rest_truncated`·`subscription_truncated`
+   기록)은 실제 데이터 gap과 구분되며, truncation 기록만으로 미해결
+   gap이 아니다(§12.1 동등 조항).
 4. `session_end`가 기록되고 내구성 있게 저장됐다.
 5. 비밀을 제외한 원본과 정규화 결과가 일치하며, 보존된 입력의 재생 결과가
    저장된 봉과 신호에 바이트 단위로 일치한다.
@@ -407,7 +433,9 @@ provenance=OK`도 운영 승인이 아니다. 각 런의 승인에는 아래 조
 `NO_TRIGGER_OBSERVED`는 위 조건을 모두 통과하고 트리거가 없는 런에만
 적용되며 "관측된 스트림에서 트리거 없음"을 뜻한다. 모든 공급자 틱을
 빠짐없이 수신했다는 증거는 아니다. 전체 운영 목표의 완료에는 별도로 PH-1
-보정과 동결된 설정을 쓰는 별도 거래일의 PH-2가 필요하다.
+보정과 동결된 설정을 쓰는 별도 거래일의 PH-2가 필요하다. 부분 관측
+세션(`LATE_START`, `BACKFILL` 포함)의 승인 범위는 실제 관측·복원 검증
+범위로 한정된다(P22).
 
 ## Attestation과 workflow trust 한계 (목표 계약 — 미구현)
 
