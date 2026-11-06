@@ -29,3 +29,4 @@ tools/notify/drill/fakesite/__pycache__/
 tests/test_event_contract
 tests/test_event_gen_contract
 tests/test_subscription_selection_contract
+tests/test_backfill_contract
