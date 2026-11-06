@@ -777,7 +777,22 @@ class SupervisorProcessTests(SupervisorTestBase):
             wait_probe("/ready", 200)
             self.assertEqual(probe("/live"), 200)
             runs = os.path.join(self.tmp, "runs")
-            self.wait_for(lambda: bool(os.listdir(runs)),
+            # session_last_start is 23:59 (HH:MM cannot express 24:00),
+            # so the supervisor rightly refuses new sessions during the
+            # final KST minute of the day. A wait that begins inside that
+            # closed minute cannot see a run directory until the midnight
+            # flip — and the volume already carries tomorrow, so the first
+            # tick past midnight starts that day's session. The deadline
+            # bridges the flip instead of expiring inside the closed
+            # minute (2026-11-05 23:59:30 KST CI flake: the fixed 15s
+            # timeout expired before the flip could reopen the window).
+            now = datetime.now(KST)
+            timeout = 15.0
+            if now.time() >= dtime(23, 59):
+                midnight = datetime.combine(now.date() + timedelta(days=1),
+                                            dtime(0, 0), KST)
+                timeout = (midnight - now).total_seconds() + 15.0
+            self.wait_for(lambda: bool(os.listdir(runs)), timeout=timeout,
                           what="session run directory")
             run_name = os.listdir(runs)[0]
             self.assertTrue(
