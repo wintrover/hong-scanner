@@ -505,26 +505,44 @@ PATH="$MOCKBIN:$PATH" "$INSTALLER" "$BCS2" "$BDCS2" 8.0.0 "$DIGEST" "$ROOT" \
   > "$SANDBOX/conc-s2.log" 2>&1 & PS2=$!
 RS1=0; wait "$PS1" || RS1=$?
 RS2=0; wait "$PS2" || RS2=$?
-assert_eq "same-version race: exactly one winner" 1 "$(( (RS1 == 0) + (RS2 == 0) ))"
-assert_eq "same-version race: exactly one loser exits 6" 1 "$(( (RS1 == 6) + (RS2 == 6) ))"
-# Either racer may win the mkdir race; the contract is that the version dir
-# holds ONE winner's complete pair -- both binaries from the same racer,
-# never a mix of the two.
 PAIR_A_HS="$(hash_of "$BCS1")"; PAIR_A_COL="$(hash_of "$BDCS1")"
 PAIR_B_HS="$(hash_of "$BCS2")"; PAIR_B_COL="$(hash_of "$BDCS2")"
 GOT_HS="$(hash_of "$ROOT/versions/8.0.0/hongscanner")"
 GOT_COL="$(hash_of "$ROOT/versions/8.0.0/collector")"
+dump_same_version_race_evidence() {
+  echo "---- same-version race failure evidence (fail-closed: never deleted)"
+  echo "racer exits: RS1=$RS1 RS2=$RS2"
+  echo "expected pairs: A hs=${PAIR_A_HS:0:16} col=${PAIR_A_COL:0:16}; B hs=${PAIR_B_HS:0:16} col=${PAIR_B_COL:0:16}"
+  echo "got: hs=${GOT_HS:0:16} col=${GOT_COL:0:16}"
+  echo "---- racer 1 log:"; cat "$SANDBOX/conc-s1.log" 2>&1 || true
+  echo "---- racer 2 log:"; cat "$SANDBOX/conc-s2.log" 2>&1 || true
+  echo "---- tree:"; find "$ROOT" -maxdepth 3 -printf '%y %m %p -> %l\n' 2>&1 || true
+  echo "---- mock gh calls:"; cat "$SANDBOX/gh.log" 2>&1 || true
+  echo "---- SHA256:"; cat "$ROOT/versions/8.0.0/SHA256" 2>&1 || true
+  echo "---- end evidence"
+}
+race_bad=0
+[ "$(( (RS1 == 0) + (RS2 == 0) ))" = 1 ] || race_bad=1
+assert_eq "same-version race: exactly one winner" 1 "$(( (RS1 == 0) + (RS2 == 0) ))"
+[ "$(( (RS1 == 6) + (RS2 == 6) ))" = 1 ] || race_bad=1
+assert_eq "same-version race: exactly one loser exits 6" 1 "$(( (RS1 == 6) + (RS2 == 6) ))"
+# Either racer may win the mkdir race; the contract is that the version dir
+# holds ONE winner's complete pair -- both binaries from the same racer,
+# never a mix of the two.
 if [ "$GOT_HS" = "$PAIR_A_HS" ] && [ "$GOT_COL" = "$PAIR_A_COL" ]; then
   echo "ok   winner installed its complete verified pair (racer A)"; PASS=$((PASS + 1))
 elif [ "$GOT_HS" = "$PAIR_B_HS" ] && [ "$GOT_COL" = "$PAIR_B_COL" ]; then
   echo "ok   winner installed its complete verified pair (racer B)"; PASS=$((PASS + 1))
 else
-  echo "FAIL the version dir mixes binaries from both racers: hs=$GOT_HS col=$GOT_COL"; FAILED=$((FAILED + 1))
+  echo "FAIL the version dir mixes binaries from both racers: hs=$GOT_HS col=$GOT_COL"; FAILED=$((FAILED + 1)); race_bad=1
 fi
 RC=0; (cd "$ROOT/versions/8.0.0" && sha256sum -c SHA256 >/dev/null 2>&1) || RC=$?
+[ "$RC" = 0 ] || race_bad=1
 assert_eq "same-version race leaves a consistent version dir" 0 "$RC"
-assert_eq "same-version race selects the version" "versions/8.0.0" \
-  "$(readlink "$ROOT/current")"
+SEL="$(readlink "$ROOT/current" 2>/dev/null || true)"
+[ "$SEL" = "versions/8.0.0" ] || race_bad=1
+assert_eq "same-version race selects the version" "versions/8.0.0" "$SEL"
+[ "$race_bad" = 0 ] || dump_same_version_race_evidence
 
 # ---------------------------------------------------------------- digest form
 echo "--- uppercase source digest is normalized"
