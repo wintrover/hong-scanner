@@ -315,9 +315,12 @@ main push 하나가 **세 개의 SLSA 증명 대상**을 만든다. 모두 동�
   ·`collector-<arch>`·`collector-<arch>-attestation`·
   `hongscanner-image-attestation` (90일 보존, 주체별 별도 이름).
 - **collector 검증**: `gh attestation verify collector --repo
-  wintrover/hongscanner` (다운로드한 collector 바이너리 경로에 대해;
-  install-attested.sh는 hongscanner 전용 — collector 운영 실행은
-  이미지 내부가 경로다).
+  wintrover/hongscanner` (다운로드한 collector 바이너리 경로에 대해).
+  tools/install-attested.sh는 두 바이너리(hongscanner·collector)를
+  **같은 versions/<버전> 디렉터리에 원자적으로 함께 설치**한다 — 두
+  바이너리 모두 각자 증명 검증을 통과해야 `current` 심볼릭 링크가 한 번만
+  교체되고, 한쪽이라도 실패하면 새 버전 전체가 선택되지 않는다
+  (fail-closed). 컨테이너 운영 경로는 여전히 이미지 내부 바이너리다.
 
 ### 8.2 운영 이미지 빌드·push (immutable main-<sha7>)
 
