@@ -29,8 +29,8 @@ const usageText = """collector — the VS-2 live collector (demo, PH-1)
             [--token-source=kiwoomcli]
             [--mrkt-tp=000 --trde-qty-cnd=0000 --stk-cnd=0 --crd-cnd=0
              --updown-incls=1 --pric-cnd=0 --trde-prica-cnd=0 --stex-tp=1]
-            [--lookback=3 --pullback-min-bp=50 --recovery-bp=30
-             --rebound-min-bp=50 --breakdown-bp=30 --warmup-bars=0
+            [--lookback-bars=3 --warmup-bars=0 --trend-min-bp=50
+             --countermove-min-bp=50 --directional-trigger-bp=30
              --hold-on-degraded=1]
 
 --token-source names the sidecar credential path carried in the init
@@ -245,15 +245,15 @@ proc main(): int =
       argValue(args, "trde-prica-cnd").defaultStr("0"),
       argValue(args, "stex-tp").defaultStr("1"),
       Params(
-        lookback: argValue(args, "lookback").defaultInt(3, "lookback"),
-        pullbackMinBp: argValue(args, "pullback-min-bp").defaultInt(50,
-          "pullback-min-bp"),
-        recoveryBp: argValue(args, "recovery-bp").defaultInt(30, "recovery-bp"),
-        reboundMinBp: argValue(args, "rebound-min-bp").defaultInt(50,
-          "rebound-min-bp"),
-        breakdownBp: argValue(args, "breakdown-bp").defaultInt(30,
-          "breakdown-bp"),
         warmupBars: argValue(args, "warmup-bars").defaultInt(0, "warmup-bars"),
+        lookbackBars: argValue(args, "lookback-bars").defaultInt(3,
+          "lookback-bars"),
+        trendMinBp: argValue(args, "trend-min-bp").defaultInt(50,
+          "trend-min-bp"),
+        countermoveMinBp: argValue(args, "countermove-min-bp").defaultInt(50,
+          "countermove-min-bp"),
+        directionalTriggerBp: argValue(args, "directional-trigger-bp")
+          .defaultInt(30, "directional-trigger-bp"),
         holdOnDegraded:
           argValue(args, "hold-on-degraded").defaultInt(1,
             "hold-on-degraded") != 0),
