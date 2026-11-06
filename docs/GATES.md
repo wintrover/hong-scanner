@@ -260,6 +260,15 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-05, 심야 앱 관측): google-services.json은 **재구성본 — 운영자 원본이 아니며 원본 대기 중**이다. 동등성 주장은 이번 실측 범위(빌드 게이트 통과·Firebase 초기화·FCM 토큰 획득·4화면 관측)로 한정되며, 원본이 제공되면 원본으로 교체한 뒤 재검증이 필요하다. Firebase 초기화·FCM 토큰 획득이 재구성 구성으로 실측 성공했으나 원본과의 전면 동등성(네이티브 SDK가 소비하는 전 범위)은 미검증이다. no-data·HTTP 오류 화면은 NOT-MEASURED(오프라인 프로브만 실측). Timeline 행의 session_id·data_quality는 미표출(기존 한계 유지 — Event Detail에서만 가시). P9·P11·P12는 BLOCKED 유지 — 앱 표시 관측은 승인이 아니며 smoke는 합성 재생, `VERDICT MATCH`는 재생 일치, 전달 ACCEPTED는 기기 도착이 아니다(FCM 토큰은 2026-11-03 무효화 — Overview 카드의 토큰 표시는 획득 사실의 표시이며 기기 도착을 의미하지 않는다). 본 항목의 모바일·runs 변경은 관측 산물·gitignored 배치뿐(커밋 0건·추적 파일 수정 0건)이다.
 
+### Evidence log (2026-11-06, 오전) — google-services.json 실본 발견·교체·생성 리소스 동등성 실측(재구성 출처 한계 해소)
+
+| gate | observed |
+|---|---|
+| 관측(실본 발견·출처) | 운영자 지적으로 실본 확인: `~/hongscanner-mobile-build/android/app/google-services.json`(679B, mtime 2026-11-03 11:46) — 2026-11-03 세션에서 운영자의 Firebase 인증으로 `flutterfire configure`가 실제 프로젝트 `hongscanner`(project_number `414607619695`)를 대상으로 생성했고, ASCII 경로 빌드 사본 디렉터리에 보존된 것이다. 2026-11-05 심야 관측의 서브에이전트는 저장소 내부만 탐색해 "원본 부재"로 판정·firebase_options.dart 재구성으로 게이트를 해소했으므로 그 판정 오류의 원인은 **탐색 범위**였다. 값은 실본과 전부 동일(diff 실측: 재구성 540B 대비 실본은 빈 `oauth_client: []`·`services.appinvite_service`(other_platform_oauth_client 빈) 섹션만 추가 — project_number·project_id·storage_bucket·mobilesdk_app_id·package_name·api_key[0].current_key·configuration_version 전부 일치) |
+| 관측(교체·재빌드·동등성) | 실본을 `mobile/android/app/google-services.json`로 교체(gitignored — `git check-ignore -v` 동일 규칙·git status clean·커밋 0건·추적 파일 수정 0건). 재빌드 `flutter build apk --debug --dart-define=HS_API_BASE=http://127.0.0.1:8080` exit 0(2026-11-06, `✓ Built build/app/outputs/flutter-apk/app-debug.apk`), 설치 후보 APK sha256 `2877154b6ca12974ada401c3539fb68110ec0e7bff47e0dd7d466bdcf9ee563a`. **동등성 실측**: 재구성 JSON 빌드(심야 설치본, APK `f952ac8e…`)가 생성한 `mobile/build/app/generated/res/processDebugGoogleServices/values/values.xml`와 실본 JSON 재빌드 생성물의 diff → **빈 출력(바이트 동일)** — google-services Gradle 플러그인이 두 구성에서 동일한 리소스를 생성함이 실측됐다. 따라서 재구성 구성으로 수행한 심야 관측(빌드·Firebase 초기화·FCM 토큰 획득·4화면·오프라인)은 실본 구성과 동등하다. 기기는 현재 adb 미부착(3회 측정 0대) — 실본 APK의 재설치·재관측은 재연결 시 선택(동등성 실측으로 필수는 아님) |
+
+한계(2026-11-06): 실본의 출처 근거는 2026-11-03 세션 기록(운영자 Firebase 인증 후 `flutterfire configure` 실행·성공)·파일 구조(재구성 경로에서는 생성되지 않는 `oauth_client`·`services` 섹션 포함)·값 일치이며, 파일 자체의 콘솔 대조·서명 검증은 없다(프로젝트 실측값과의 일치는 Firebase 초기화 성공·FCM 토큰 획득 실측이 간접 증거). 생성 리소스 동등성은 `processDebugGoogleServices/values/values.xml` 산출물 기준이며, 빈 섹션이 추가 리소스를 생성하지 않는다는 GoogleServicesTask.kt 구조 해석과 일치한다. 기기 미부착 상태이므로 실본 APK(`2877154b…`)의 재설치·기동 관측은 NOT-MEASURED. no-data·HTTP 오류 화면·Timeline 행 출처 표시·P9·P11·P12 한계는 기존 그대로 유지된다. 본 항목 변경은 docs/GATES.md 기록·gitignored 파일 교체·빌드 산출물뿐(추적 코드 수정 0줄).
+
 ## Completion Evidence
 
 ```bash
