@@ -168,6 +168,36 @@ block barBoundary:
   check("half day 12:00:00 is bar 59 with close_boundary",
         b4.currentBarIndex("A") == 59 and b4.currentBarBoundary("A"))
 
+# ---------------------------------------------------------------- params
+block paramsParsing:
+  ## §6/P23 symmetric params: new names parse, legacy names are ignored in
+  ## favor of the declared defaults (pre-contract semantics, P24), and
+  ## impossible values fail closed at parse time.
+  proc cfg(params: HcjValue): Config =
+    parseConfig(hObj(("params", params), ("session_date", hStr("2026-10-29"))))
+  let sym = cfg(hObj(
+    ("warmup_bars", hInt(2)), ("lookback_bars", hInt(5)),
+    ("trend_min_bp", hInt(70)), ("countermove_min_bp", hInt(60)),
+    ("directional_trigger_bp", hInt(40)), ("hold_on_degraded", hBool(false))))
+  check("new param names parse into the engine params",
+    sym.params == Params(warmupBars: 2, lookbackBars: 5, trendMinBp: 70,
+                         countermoveMinBp: 60, directionalTriggerBp: 40,
+                         holdOnDegraded: false))
+  let legacy = cfg(hObj(
+    ("lookback", hInt(3)), ("pullback_min_bp", hInt(50)),
+    ("rebound_min_bp", hInt(50)), ("recovery_bp", hInt(30)),
+    ("breakdown_bp", hInt(30))))
+  check("legacy param names are ignored (declared defaults apply, no crash)",
+    legacy.params == Params(warmupBars: 0, lookbackBars: 3, trendMinBp: 50,
+                            countermoveMinBp: 50, directionalTriggerBp: 30,
+                            holdOnDegraded: true))
+  checkRaises("negative bp threshold is rejected", proc () =
+    discard cfg(hObj(("trend_min_bp", hInt(-1)))))
+  checkRaises("lookback_bars below 1 is rejected", proc () =
+    discard cfg(hObj(("lookback_bars", hInt(0)))))
+  checkRaises("negative warmup_bars is rejected", proc () =
+    discard cfg(hObj(("warmup_bars", hInt(-1)))))
+
 # ---------------------------------------------------------------- replay
 block baseReplay:
   let pairs = pairsOf(baseLines)
@@ -177,11 +207,12 @@ block baseReplay:
   check("base replay yields 22 bars", res.bars.len == 22)
   var got: seq[string]
   for s in res.signals: got.add(s.symbol & "/" & $s.barIndex & "/" & s.signal)
-  check("base signals hold unverified bearish decisions", got.join(",") ==
-    "000660/0/SIGNAL_HELD,000660/4/SIGNAL_HELD," &
-    "000660/5/SIGNAL_HELD,000660/9/SIGNAL_HELD," &
-    "005930/0/SIGNAL_HELD,005930/7/SIGNAL_HELD," &
-    "005930/8/SIGNAL_HELD,005930/9/bullish_pullback_reversal")
+  check("base signals are the symmetric mirror pair at bar 9",
+        got.join(",") ==
+    "000660/0/SIGNAL_HELD,000660/9/bearish_rebound_failure," &
+    "005930/0/SIGNAL_HELD,005930/9/bullish_pullback_reversal")
+  check("the bearish verdict is real (reason \"\")",
+        res.signals[1].reason == "")
   check("held bar reports its reason", res.signals[0].reason == "first_after_sub")
   var closedAll = true
   for bar in res.bars:
