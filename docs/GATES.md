@@ -378,6 +378,20 @@ PR #35~#41 merge분에 대한 attest·설치·검증 재측정(AGENTS.md §2.2)�
 
 한계(2026-11-06, VS-F F-2): ka10080의 cntr_tm 봉 경계 의미(구간 시작/종료)는 공식 문서상 미확정 — 백필 파서는 "cntr_tm 포함 구간 배치(틱과 동일 규칙)"로 구현했고 계약 그대로 **demo 실측 캡처로 검증 전까지 UNVERIFIED**(F-1, 11-09). F-2 완료 조건의 실측 절반(실제 demo 서버 ka10080 원본 캡처 + 체크섬)은 F-1 세션에서 수행한다 — 본 PR은 구현·합성 계약·CI·merge·파이프라인 복구까지만 기록한다. REST 응답에 조회시각 필드가 없어 seq가 시간 게이지라는 기존 계약은 변경 없음.
 
+### Evidence log (2026-11-06, 심야) — VS-F F-3: demo/real 환경 선택 착지(PR #72)
+
+| gate | observed |
+|---|---|
+| 구현(PR #72, 코드 커밋 `1e08bcd`·update-branch 병합 `0619653`, +486/−98) | 환경 값은 `demo`\|`real` 2값뿐 — `replay.nim` 수용 집합에서 `prod` 제거(기존 봉인 런이 전부 demo라 무영향 — F-0 "밤 2" 예고 이행). CLI `--environment=demo\|real`(기본 demo) → init 라인 `"environment"` 필드 → sidecar `parse_init` 전파. 도메인 파생 `restDomainFor`/`wsEndpointFor`(공식 서버 분리 문서 상수 — real REST `https://api.kiwoom.com`·WS `wss://api.kiwoom.com:10000` 동일 경로): 호출자 도메인 지정 불가·환경 간 혼합 구조적 불가, sidecar도 동일 규칙 이중 검사 |
+| 자격 분리(fail-closed) | demo `APP_KEY_MOCK`/`APP_SECRET_MOCK`(기존 관례)·real `APP_KEY_REAL`/`APP_SECRET_REAL` — `EnvTokenProvider`가 선택 환경의 변수만 읽고 누락 시 교차 대체 없이 거부(exit 3), OAuth 엔드포인트도 환경 파생. 자격 값의 코드·커밋·로그 반입 0건(테스트는 FAKE 픽스처 + leak 게이트) |
+| 주문 경로 0건 | 코드 전수 검색(src/·tools/): REST `/api/dostk/rkinfo`(ka10027 시세)·`/api/dostk/chart`(ka10080)·`/oauth2/token`(인증), WS `/api/dostk/websocket`(구독·체결수신)뿐 — **주문 TR/API 호출 경로 0건**(AGENTS §-1 유지) |
+| 계약 테스트(합성 입력만) | test_collector_contract 82(real 파생·전파·prod/staging/빈값·helper 거부)·test_collector_pipe_contract 34(실제 바이너리 real init·config 기록에 mockapi 0건·거부 3종 exit 2)·sidecar 53(교차 혼합 거부 5종·교차 대체 금지 양방향·real 발급 본문·leak 게이트)·cli(prod 폐기 거부)·sub_input(real 수용·prod 거부·torn-tail real) |
+| 게이트·CI(순차 관측) | 로컬 `bash tools/run_tests.sh` exit 0 + 마컈 1회(약 116초). `1e08bcd`: push [42209861148](https://github.com/wintrover/hongscanner/actions/runs/42209861148)·pull_request [42210104174](https://github.com/wintrover/hongscanner/actions/runs/42210104174) 전부 `gh run watch --exit-status` exit 0·conclusion success·마컈 각 1회. update-branch 후 `0619653`: push [42210657104](https://github.com/wintrover/hongscanner/actions/runs/42210657104)·pull_request [42210663910](https://github.com/wintrover/hongscanner/actions/runs/42210663910) 전부 동일 관측 → merge `193ded3`. post-merge ci [42211225819](https://github.com/wintrover/hongscanner/actions/runs/42211225819) success·마컈 1회, attest [42211225754](https://github.com/wintrover/hongscanner/actions/runs/42211225754) success |
+| 참고(중복 해소 실측) | F-3 브랜치(base 7ab3c9c)가 독자적으로 추가한 `.gitignore` 1행(`tests/test_backfill_contract` — 워크트리 위생)은 PR #70이 main에 반영한 것과 동일 변경: merge 시 git이 자동 해소·무충돌(MERGEABLE) 실측 |
+| F-4 전제(운영자 요청) | real 캡처(F-4)는 운영자가 키움에서 real 전용 App Key/Secret을 발급해 **로컬 환경 변수(`APP_KEY_REAL`/`APP_SECRET_REAL`)로 직접 준비**한 뒤에만 실행 가능 — 자격을 대화·저장소에 반입하지 않는다(AGENTS §0.3). demo 실측(F-1)은 11-09 세션 예정(cron 등록 완료) |
+
+한계(2026-11-06, VS-F F-3): real 연결·인증의 실측(실전 서버 접속 성공)은 F-4의 실행 항목이며 본 PR은 선택·전파·거부 계약의 구현·합성 검증까지만 기록한다. 가이드의 `KIWOOM_MODE` 환경변수는 CLI·파이프 프로토콜 경로 밖이라 미도입(필요 시 후속 과제). 컨테이너 슈퍼바이저는 미지정 시 기본 demo로 기존 불변. 본 PR merge의 post-merge 관측 결과는 전례대로 후속 증거 기록에 추가한다.
+
 ## Completion Evidence
 
 ```bash
