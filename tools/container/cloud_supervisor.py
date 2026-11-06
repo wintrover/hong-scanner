@@ -470,7 +470,16 @@ class ApiProcess:
     refuses its configuration (exit 2) keeps saying so in the log
     while /ready stays 503; the supervisor never turns that into a
     success. Child stdout is forwarded verbatim (unprefixed) so the
-    container log keeps serving the original SERVE line."""
+    container log keeps serving the original SERVE line.
+
+    Lifecycle ownership is deterministic (the 2026-11-06 orphan fix):
+    the child is spawned into its own session/process group
+    (start_new_session) and every teardown — stop() and a start() over
+    a still-live previous child — signals the whole group (os.killpg:
+    SIGTERM, bounded wait, SIGKILL) and waits for the exit. A live
+    child is never abandoned by overwriting self.proc: a leaked child
+    outlives its parent, is reparented to init and keeps every
+    inherited fd open."""
 
     def __init__(self, cfg, clock, log):
         self.cfg = cfg
@@ -493,20 +502,56 @@ class ApiProcess:
                 "--ledger", self.cfg.ledger_path]
 
     def start(self):
+        self._reap_previous_child()
         self._gen += 1
         gen = self._gen
         self.state = "starting"
         self.proc = subprocess.Popen(
             self.command(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            text=True, bufsize=1, errors="replace")
+            text=True, bufsize=1, errors="replace", start_new_session=True)
         threading.Thread(target=self._pump, args=(gen,),
                          daemon=True).start()
         self.log("api child started pid=%d (serve.py)" % self.proc.pid)
 
+    def _signal_group(self, proc, sig):
+        """Signal the child's whole process group. The child is spawned
+        with start_new_session, so it is its own group leader and
+        anything it later forks shares that group — the teardown reaches
+        the entire tree, not just the direct pid."""
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    def _reap_previous_child(self):
+        """start() over a still-live previous child must stop that child
+        first: overwriting self.proc without signaling is how a serve.py
+        child was orphaned (2026-11-06: the leaked child survived as
+        ppid=1 and held the inherited stderr fd, stalling the test
+        gate's pipeline). SIGTERM the group, wait a bounded time, then
+        SIGKILL the group."""
+        proc = self.proc
+        if proc is None:
+            return
+        if proc.poll() is None:
+            self._signal_group(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=self.cfg.kill_grace_seconds)
+            except subprocess.TimeoutExpired:
+                self._signal_group(proc, signal.SIGKILL)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            self.log("replaced still-live api child pid=%d (stopped, "
+                     "never abandoned)" % proc.pid)
+
     def _pump(self, gen):
         """Forward the child's stdout verbatim; the SERVE line marks the
         child as serving. A generation guard keeps a lingering old
-        thread from marking a newer child."""
+        thread from marking a newer child. The pipe is closed at EOF
+        (deterministic finalization — not left for the GC to warn
+        about)."""
         proc = self.proc
         try:
             for line in proc.stdout:
@@ -519,6 +564,11 @@ class ApiProcess:
                 _emit(line)
         except (OSError, ValueError):
             pass
+        finally:
+            try:
+                proc.stdout.close()
+            except (OSError, ValueError):
+                pass
 
     def poll(self):
         """The child's exit code once it has exited (and the restart is
@@ -550,17 +600,18 @@ class ApiProcess:
             self.start()
 
     def stop(self, grace):
-        """SIGTERM (serve.py drains and exits 0), then SIGKILL."""
+        """SIGTERM the child's whole process group (serve.py drains and
+        exits 0), bounded wait, then SIGKILL the group."""
         self.stopping = True
         proc = self.proc
         if proc is None or proc.poll() is not None:
             return proc.returncode if proc is not None else None
-        proc.terminate()
+        self._signal_group(proc, signal.SIGTERM)
         try:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             self.log("api child ignored SIGTERM — SIGKILL")
-            proc.kill()
+            self._signal_group(proc, signal.SIGKILL)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
