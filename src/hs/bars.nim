@@ -1,5 +1,10 @@
 ## Bar builder: 3-minute bars keyed by t_exch only.
 ##
+## This module builds LIVE bars from ticks (ws_frame / 0B ws_raw). Bars
+## derived from ka10080 REST evidence (BACKFILL origin, REPLAY_CONTRACT
+## §12.8) are built separately by backfill.nim; the origin field on Bar
+## marks the difference and nothing in this builder ever sets it.
+##
 ## Contract (plan §3.2/§3.3):
 ##   i(t) = floor((t - open) / 180s), interval [open+180i, open+180(i+1))
 ##   t == close  -> last bar, close_boundary
@@ -36,6 +41,10 @@ type
     closeBoundary*: bool
     empty*: bool
     closed*: bool
+    origin*: string         ## "" (LIVE, ws_frame-derived) | "BACKFILL"
+                            ## (ka10080-derived, REPLAY_CONTRACT §7/§12.8):
+                            ## optional field, emitted only when BACKFILL so
+                            ## live-only output stays byte-identical
 
   LateTickError* = object of CatchableError
   UnresolvedGapError* = object of CatchableError

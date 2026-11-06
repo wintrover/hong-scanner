@@ -16,6 +16,17 @@
 ##     fields (stk_cls stk_cd stk_nm cur_prc pred_pre_sig pred_pre flu_rt
 ##     sel_req buy_req now_trde_qty cntr_str cnt); documented examples add
 ##     return_code (int, 0 = ok) and return_msg (string).
+##   ka10080 주식분봉차트조회 — POST /api/dostk/chart, JSON (official
+##   document, 2026-11-06 collection). Request body (String): stk_cd
+##   (required), tic_scope (required; "1:1분, 3:3분, 5, 10, 15, 30, 45,
+##   60" — this implementation pins "3", the declared 3-minute scope),
+##   upd_stkpc_tp (required; 0 or 1), base_dt (OPTIONAL, YYYYMMDD).
+##   Continuation is the same cont-yn/next-key header pair (all pages,
+##   until cont_yn != "Y"). Response body: stk_min_pole_chart_qry (LIST)
+##   of rows with 9 String fields (cur_prc trde_qty cntr_tm open_pric
+##   high_pric low_pric pred_pre pred_pre_sig acc_trde_qty); cur_prc is
+##   부호가 포함된 숫자 (원), cntr_tm is 체결시간 YYYYMMDDHHmmss. The
+##   mock domain is https://mockapi.kiwoom.com (KRX only).
 ##   business errors arrive as HTTP 200 with return_code != 0; the official
 ##     example also tolerates an absent return_code (a client-side choice).
 ##   continuation: response headers cont-yn ("Y" while more data) + next-key;
@@ -65,7 +76,7 @@
 ##     compares them byte- and value-wise with the stored events; any
 ##     difference is an issue and the caller must reject.
 ##   - REPEAT/CAP SUBSET: page repetition and the page cap are properties of
-##     TRs explicitly declared paginated (paginatedTrs — only ka10027 here),
+##     TRs explicitly declared paginated (paginatedTrs — ka10027 and ka10080),
 ##     not of vendor input in general.
 ##   - CANDIDATES: up = sort_tp "1", down = sort_tp "3", stex_tp "1" (KRX).
 ##
@@ -75,8 +86,13 @@
 ## interpreted numerically), page sizes, and whether production ever omits
 ## return_code on a success (until that is independently confirmed, omission
 ## is a failure, per the fail-closed requirement). return_msg is preserved in
-## the raw bytes but never parsed for a decision. Tests are synthetic only
-## (M10).
+## the raw bytes but never parsed for a decision. For ka10080 specifically:
+## whether cntr_tm denotes the bar interval's start or its end is not stated
+## by the official document (UNVERIFIED) — the raw cntr_tm string is
+## preserved verbatim in the response bytes and no re-encoded copy is ever
+## recorded; the derived bar's interval placement is a declared scanner-side
+## interpretation documented in backfill.nim, to be resolved by a measured
+## demo capture. Tests are synthetic only (M10).
 import std/[strutils, options]
 import hcj, digest
 
@@ -135,10 +151,26 @@ type
     trdePricaCnd*: string
     stexTp*: string
 
+  Ka10080Query* = object
+    ## The declared request scope of one ka10080 chart query: one symbol's
+    ## 3-minute bars. tic_scope is pinned to the declared 3-minute scope
+    ## ("3") by the acceptance path; base_dt is the documented OPTIONAL
+    ## request field ("" = absent).
+    stkCd*: string
+    ticScope*: string
+    updStkpcTp*: string
+    baseDt*: string
+
   PageChain* = object
     ## Ordered pages answering one ka10027 query. Physical order is the
     ## authority; the cont-yn chain is validated, never trusted.
     query*: Ka10027Query
+    pages*: seq[RawHttpResp]
+
+  Ka10080Chain* = object
+    ## Ordered pages answering one ka10080 query. Same authority rule as
+    ## PageChain: physical order, validated cont-yn, never trusted.
+    query*: Ka10080Query
     pages*: seq[RawHttpResp]
 
   EventKind* = enum
@@ -172,6 +204,17 @@ const
     "stk_cls", "stk_cd", "stk_nm", "cur_prc", "pred_pre_sig", "pred_pre",
     "flu_rt", "sel_req", "buy_req", "now_trde_qty", "cntr_str", "cnt"]
 
+  ka10080ApiId* = "ka10080"
+  ka10080Path* = "/api/dostk/chart"
+  ka10080ListKey* = "stk_min_pole_chart_qry"
+  ka10080RowFields* = [
+    "cur_prc", "trde_qty", "cntr_tm", "open_pric", "high_pric", "low_pric",
+    "pred_pre", "pred_pre_sig", "acc_trde_qty"]
+
+  ## Request enums, verbatim from the official ka10080 field descriptions.
+  ka10080TicScopeValues* = ["1", "3", "5", "10", "15", "30", "45", "60"]
+  ka10080UpdStkpcTpValues* = ["0", "1"]
+
   ## Request enums, verbatim from the official ka10027 field descriptions.
   ka10027MrktTpValues* = ["000", "001", "101"]
   ka10027SortTpValues* = ["1", "2", "3", "4", "5"]
@@ -196,7 +239,7 @@ const
 
   ## The explicit subset of TRs this module declares paginated: repeat and
   ## the page cap apply to these only, never to vendor input as a whole.
-  paginatedTrs* = ["ka10027"]
+  paginatedTrs* = ["ka10027", "ka10080"]
 
   ## Header names that must never pass through this layer.
   secretHeaderNames* = [
@@ -210,6 +253,13 @@ let
     paginated: true,
     listKey: ka10027ListKey,
     rowFields: @ka10027RowFields)
+
+  ka10080Spec* = TrSpec(
+    apiId: ka10080ApiId,
+    path: ka10080Path,
+    paginated: true,
+    listKey: ka10080ListKey,
+    rowFields: @ka10080RowFields)
 
 proc verr(f: VendorFailure; msg: string): ref VendorInputError =
   let e = newException(VendorInputError, msg)
@@ -339,6 +389,50 @@ proc ka10027RequestBody*(q: Ka10027Query): HcjValue =
     ("trde_prica_cnd", hStr(q.trdePricaCnd)),
     ("stex_tp", hStr(q.stexTp)))
 
+proc allDigits(s: string): bool =
+  if s.len == 0: return false
+  for c in s.items:
+    if c < '0' or c > '9': return false
+  true
+
+proc validateKa10080Query*(q: Ka10080Query) =
+  ## The documented request fields. stk_cd is a free string (the official
+  ## spec pins no enum; lengths are not enforced, like ka10027), tic_scope
+  ## and upd_stkpc_tp must be documented enum values, and a present base_dt
+  ## must be the documented YYYYMMDD form (8 digits). The acceptance path
+  ## additionally pins tic_scope to the declared 3-minute scope.
+  if q.stkCd.len == 0:
+    raise verr(vfContract, "ka10080 stk_cd must not be empty")
+  requireIn("tic_scope", q.ticScope, ka10080TicScopeValues)
+  requireIn("upd_stkpc_tp", q.updStkpcTp, ka10080UpdStkpcTpValues)
+  if q.baseDt.len > 0 and not allDigits(q.baseDt):
+    raise verr(vfContract,
+               "ka10080 base_dt is not the documented YYYYMMDD form: " &
+               q.baseDt)
+
+proc initKa10080Query*(stkCd, ticScope, updStkpcTp, baseDt: string): Ka10080Query =
+  result = Ka10080Query(stkCd: stkCd, ticScope: ticScope,
+                        updStkpcTp: updStkpcTp, baseDt: baseDt)
+  validateKa10080Query(result)
+
+proc ka10080RequestBody*(q: Ka10080Query): HcjValue =
+  ## The documented request body fields. base_dt is OPTIONAL in the official
+  ## spec: it is emitted only when declared (non-empty), so an absent
+  ## base_dt round-trips as an absent field, never as an empty string.
+  ## No authorization header is produced here.
+  validateKa10080Query(q)
+  if q.baseDt.len > 0:
+    hObj(
+      ("base_dt", hStr(q.baseDt)),
+      ("stk_cd", hStr(q.stkCd)),
+      ("tic_scope", hStr(q.ticScope)),
+      ("upd_stkpc_tp", hStr(q.updStkpcTp)))
+  else:
+    hObj(
+      ("stk_cd", hStr(q.stkCd)),
+      ("tic_scope", hStr(q.ticScope)),
+      ("upd_stkpc_tp", hStr(q.updStkpcTp)))
+
 proc continuationHeaders*(prev: RawHttpResp): tuple[contYn, nextKey: string] =
   ## cont-yn/next-key values for the next request, per spec: set both only
   ## when the previous response header said Y.
@@ -402,7 +496,7 @@ proc rowFromArr(spec: TrSpec; item: HcjValue): HcjValue =
     ps.add((spec.rowFields[i], v))
   result = objOf(ps)
 
-proc parsePageRows(spec: TrSpec; resp: RawHttpResp): seq[HcjValue] =
+proc parsePageRows*(spec: TrSpec; resp: RawHttpResp): seq[HcjValue] =
   ## Fail closed on any response failure: api-id/path pair mismatch
   ## (swapping api-id on a shared URL fails silently at the vendor, so the
   ## pair is checked here), non-200 transport status, responses that do not
@@ -510,8 +604,7 @@ proc validateChainPages(spec: TrSpec; pages: seq[RawHttpResp]; pageCap: int;
 
 proc normalizeChain*(spec: TrSpec; chain: PageChain;
                      pageCap: int = defaultPageCap;
-                     truncatedOk = false): seq[VendorEvent] =
-  ## Pure: preserved page bytes -> normalized row events, in page then row
+                     truncatedOk = false): seq[VendorEvent] =  ## Pure: preserved page bytes -> normalized row events, in page then row
   ## order. Every failure raises; a partial event list is never returned.
   ## truncatedOk consumes a cap-closed chain as a declared truncated subset
   ## (the caller owns the truncation fact; see validateChainPages).
@@ -543,6 +636,23 @@ proc wsEvents*(payloads: seq[RawWsPayload]): seq[VendorEvent] =
       sourceSha256: sha256Hex(w),
       canonical: "",
       payload: w.payload))
+
+proc verifyKa10080Chain*(chain: Ka10080Chain;
+                         pageCap: int = defaultPageCap;
+                         truncatedOk = false) =
+  ## Audit one ka10080 chart chain exactly the way the ka10027 path affirms
+  ## success: the declared scope against the documented enums, the
+  ## cont-yn/page-cap chain rules (validateChainPages is spec-generic), and
+  ## every page's rows against the documented row schema (parsePageRows:
+  ## HTTP 200, return_code present + integer + 0, list key present, every
+  ## row exactly the documented fields, all strings). Raises on any failure;
+  ## a partial validation is never a success. truncatedOk consumes a
+  ## cap-closed chain as a declared truncated subset (same owner rule as
+  ## ka10027: the caller owns the truncation fact).
+  validateKa10080Query(chain.query)
+  validateChainPages(ka10080Spec, chain.pages, pageCap, truncatedOk)
+  for resp in chain.pages:
+    discard parsePageRows(ka10080Spec, resp)
 
 proc normalizeEvents*(cap: VendorCapture;
                       pageCap: int = defaultPageCap): seq[VendorEvent] =

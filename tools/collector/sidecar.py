@@ -53,6 +53,14 @@ DEMO_WS_ENDPOINT = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
 # never from the wire.
 OAUTH_TOKEN_PATH = "/oauth2/token"
 REST_PATH = "/api/dostk/rkinfo"
+# ka10080 주식분봉차트조회 (official document, 2026-11-06): one chart page
+# per command; pagination judgment (cont-yn/next-key) stays with the core,
+# exactly like the ka10027 path.
+CHART_REST_PATH = "/api/dostk/chart"
+CHART_API_ID = "ka10080"
+CHART_PARAM_FIELDS = ["stk_cd", "tic_scope", "upd_stkpc_tp"]
+# base_dt is the documented OPTIONAL request field: present (non-empty
+# string) it is sent verbatim; absent or empty it is omitted from the body.
 TOKEN_BUFFER_SECONDS = 600
 # The auth-class LOGIN ack codes (README §2.2): one refresh + one retry.
 LOGIN_RETRY_CODES = {8005, 8031, 8103}
@@ -702,6 +710,95 @@ class Sidecar:
                          "cont_yn": cont, "next_key": key,
                          "body_hex": body.hex()})
 
+    # ---------------------------------------------------- ka10080 chart REST
+
+    def do_chart(self, params, cont_yn, next_key):
+        """One ka10080 chart page request on the caller's executor thread
+        (README §2.7). The declared request scope (params) is sent verbatim —
+        this process never judges a scope; the response is reported raw
+        exactly like do_rest. Pacing is the shared vendor limit: every REST
+        request, rkinfo or chart, is spaced by rest_min_interval."""
+        self._pace_rest()
+        data = json.dumps(params, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json;charset=utf-8",
+            "api-id": CHART_API_ID,
+            "authorization": ("%s %s" % (self.token_type, self.token)).strip(),
+        }
+        if cont_yn == "Y":
+            headers["cont-yn"] = "Y"
+        if next_key:
+            headers["next-key"] = next_key
+        req = urllib.request.Request(
+            self.rest_domain + CHART_REST_PATH, data=data, headers=headers,
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return (resp.status, resp.headers.get("cont-yn") or "",
+                        resp.headers.get("next-key") or "", resp.read())
+        except urllib.error.HTTPError as e:
+            # An HTTP response with an error status is still a response:
+            # the core owns the verdict (401 included).
+            try:
+                body = e.read()
+                cont = e.headers.get("cont-yn") or ""
+                key = e.headers.get("next-key") or ""
+            except Exception:
+                body, cont, key = b"", "", ""
+            return e.code, cont, key, body
+        except Exception as exc:
+            raise RestError("transport failed: " + type(exc).__name__)
+
+    def _chart_params(self, cmd):
+        """Validate the chart command's declared scope (transport shape
+        only, README §2.7): api_id pinned to the approved chart API, the
+        three documented required params as non-empty strings, base_dt an
+        optional string (empty/absent = omitted from the request body).
+        The scope's VALUE authority (enums, the declared 3-minute scope)
+        is the Nim core's vendor_input layer, never this process."""
+        if cmd.get("api_id") != CHART_API_ID:
+            raise SidecarExit(4, "chart api_id must be " + CHART_API_ID)
+        params = cmd.get("params")
+        if not isinstance(params, dict):
+            raise SidecarExit(4, "chart command needs a params object")
+        for key in CHART_PARAM_FIELDS:
+            value = params.get(key)
+            if not isinstance(value, str) or not value:
+                raise SidecarExit(
+                    4, "chart params.%s must be a non-empty string" % key)
+        base_dt = params.get("base_dt")
+        if base_dt is not None and not isinstance(base_dt, str):
+            raise SidecarExit(4, "chart params.base_dt must be a string")
+        body = dict(params)
+        if not body.get("base_dt"):
+            body.pop("base_dt", None)
+        return body
+
+    async def handle_chart(self, cmd):
+        params = self._chart_params(cmd)
+        cont_yn = cmd.get("cont_yn", "")
+        if cont_yn not in ("", "Y", "N"):
+            raise SidecarExit(4, "chart cont_yn must be Y, N or empty")
+        next_key = cmd.get("next_key", "")
+        if not isinstance(next_key, str):
+            raise SidecarExit(4, "chart next_key must be a string")
+        if isinstance(cmd.get("page"), bool) or \
+           not isinstance(cmd.get("page"), int) or cmd["page"] < 1:
+            raise SidecarExit(4, "chart command needs page >= 1")
+        loop = asyncio.get_running_loop()
+        try:
+            status, cont, key, body = await loop.run_in_executor(
+                None, self.do_chart, params, cont_yn, next_key)
+        except RestError as exc:
+            self.emit({"ev": "error", "what": "rest",
+                             "detail": exc.args[0]})
+            return
+        self.emit({"ev": "rest_chart", "api_id": CHART_API_ID,
+                         "page": cmd["page"], "status": status,
+                         "cont_yn": cont, "next_key": key,
+                         "body_hex": body.hex()})
+
     # -------------------------------------------------------- commands
 
     async def handle(self, cmd):
@@ -737,6 +834,8 @@ class Sidecar:
             self.arm_quiet()
         elif ctype == "rest_req":
             await self.handle_rest(cmd)
+        elif ctype == "chart_req":
+            await self.handle_chart(cmd)
         elif ctype == "refresh_token":
             try:
                 self.acquire_token(force=True)

@@ -916,6 +916,259 @@ class SidecarContract(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(err["detail"].startswith("transport failed"))
         self.assertEqual(await h.stop_and_join(), 0)
 
+    # ------------------------------------------------------ chart (ka10080)
+
+    async def test_chart_req_reports_the_raw_response(self):
+        """README §2.7: one ka10080 page, raw response, params verbatim."""
+        h = self.harness()
+        await h.start()
+        captured = {}
+
+        class FakeResp:
+            status = 200
+
+            def __init__(self):
+                self.headers = {"cont-yn": "Y", "next-key": "pg2"}
+
+            def read(self):
+                return b'{"stk_min_pole_chart_qry":[],"return_code":0}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            captured["req"] = req
+            captured["timeout"] = timeout
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="chart_req", api_id="ka10080", page=1,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "0", "base_dt": ""},
+                   cont_yn="", next_key="")
+            evs = await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest_chart" for e in evs),
+                "the rest_chart event")
+
+        ev = [e for e in evs if e.get("ev") == "rest_chart"][-1]
+        self.assertEqual(ev["api_id"], "ka10080")
+        self.assertEqual(ev["page"], 1)
+        self.assertEqual(ev["status"], 200)
+        self.assertEqual(ev["cont_yn"], "Y")
+        self.assertEqual(ev["next_key"], "pg2")
+        self.assertEqual(ev["body_hex"],
+                         b'{"stk_min_pole_chart_qry":[],"return_code":0}'
+                         .hex())
+        self.assertNotIn("direction", ev)
+
+        req = captured["req"]
+        self.assertEqual(req.full_url,
+                         sidecar.DEMO_REST_DOMAIN + sidecar.CHART_REST_PATH)
+        self.assertEqual(req.headers.get("Api-id"), "ka10080")
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer " + TOKEN)
+        body = json.loads(req.data.decode("utf-8"))
+        # base_dt is OPTIONAL: empty means omitted from the request body.
+        self.assertEqual(body, {"stk_cd": "005930", "tic_scope": "3",
+                                "upd_stkpc_tp": "0"})
+        self.assertEqual(captured["timeout"], 30)
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_req_sends_base_dt_when_declared(self):
+        h = self.harness()
+        await h.start()
+        captured = {}
+
+        class FakeResp:
+            status = 200
+            headers = {}
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            captured["req"] = req
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="chart_req", api_id="ka10080", page=1,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "1",
+                           "base_dt": "20261105"})
+            await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest_chart" for e in evs),
+                "the rest_chart event")
+
+        body = json.loads(captured["req"].data.decode("utf-8"))
+        self.assertEqual(body, {"stk_cd": "005930", "tic_scope": "3",
+                                "upd_stkpc_tp": "1",
+                                "base_dt": "20261105"})
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_req_continuation_headers(self):
+        h = self.harness()
+        await h.start()
+        captured = {}
+
+        class FakeResp:
+            status = 200
+            headers = {}
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            captured["req"] = req
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="chart_req", api_id="ka10080", page=2,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "0"},
+                   cont_yn="Y", next_key="pg2")
+            await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest_chart" for e in evs),
+                "the rest_chart event")
+
+        self.assertEqual(captured["req"].headers.get("Cont-yn"), "Y")
+        self.assertEqual(captured["req"].headers.get("Next-key"), "pg2")
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_requests_share_the_rest_pacing(self):
+        """README §2.4/§2.7: the vendor's one-TR-per-second limit is one
+        pacing lock for ALL REST traffic — a chart page after a rkinfo page
+        is spaced the same way."""
+        h = self.harness(rest_min_interval=0.25)
+        await h.start()
+        stamps = []
+
+        class FakeResp:
+            status = 200
+            headers = {}
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            stamps.append(time.monotonic())
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="rest_req", direction="up", page=1,
+                   cont_yn="", next_key="")
+            await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest" for e in evs),
+                "the rest event")
+            h.send(type="chart_req", api_id="ka10080", page=1,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "0"})
+            await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest_chart" for e in evs),
+                "the rest_chart event")
+
+        self.assertEqual(len(stamps), 2)
+        self.assertGreaterEqual(stamps[1] - stamps[0], 0.23,
+                                "the chart page raced the rkinfo page " +
+                                "inside the vendor's one-request-per-second " +
+                                "limit")
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_http_error_is_still_a_response(self):
+        h = self.harness()
+        await h.start()
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError("http://test", 401, "unauthorized",
+                                         {"cont-yn": "", "next-key": ""},
+                                         None)
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="chart_req", api_id="ka10080", page=1,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "0"})
+            evs = await h.wait_for(
+                lambda evs: any(e.get("ev") == "rest_chart" for e in evs),
+                "the 401 as a rest_chart event, not an error")
+        ev = [e for e in evs if e.get("ev") == "rest_chart"][-1]
+        self.assertEqual(ev["status"], 401)
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_transport_failure_is_an_error_event(self):
+        h = self.harness()
+        await h.start()
+
+        def fake_urlopen(req, timeout=None):
+            raise ConnectionRefusedError("no route")
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            h.send(type="chart_req", api_id="ka10080", page=1,
+                   params={"stk_cd": "005930", "tic_scope": "3",
+                           "upd_stkpc_tp": "0"})
+            evs = await h.wait_for(
+                lambda evs: any(e.get("ev") == "error" and
+                                e.get("what") == "rest" for e in evs),
+                "the chart transport failure as error what=rest")
+        err = [e for e in evs if e.get("ev") == "error"][-1]
+        self.assertTrue(err["detail"].startswith("transport failed"))
+        self.assertEqual(await h.stop_and_join(), 0)
+
+    async def test_chart_command_shape_is_refused_fail_closed(self):
+        """README §2.7: the approved chart api-id, the three documented
+        required params and page >= 1 are transport-shape law — anything
+        else is exit 4, never a guessed request."""
+        cases = [
+            {"api_id": "ka11080",
+             "params": {"stk_cd": "005930", "tic_scope": "3",
+                        "upd_stkpc_tp": "0"}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"tic_scope": "3", "upd_stkpc_tp": "0"}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "", "tic_scope": "3",
+                        "upd_stkpc_tp": "0"}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "005930", "upd_stkpc_tp": "0"}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "005930", "tic_scope": 3,
+                        "upd_stkpc_tp": "0"}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "005930", "tic_scope": "3",
+                        "upd_stkpc_tp": "0", "base_dt": 20261105}, "page": 1},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "005930", "tic_scope": "3",
+                        "upd_stkpc_tp": "0"}, "page": 0},
+            {"api_id": "ka10080",
+             "params": {"stk_cd": "005930", "tic_scope": "3",
+                        "upd_stkpc_tp": "0"}, "page": "1"},
+        ]
+        for cmd in cases:
+            h = self.harness()
+            await h.start()
+            with self.assertRaises(sidecar.SidecarExit) as raised:
+                await h.sc.handle(cmd)
+            self.assertEqual(raised.exception.code, 4, str(cmd))
+            h.close()
+
     # --------------------------------------------------------- drain etc.
 
     async def test_wait_drain_reports_drain_done(self):

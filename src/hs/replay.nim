@@ -3,7 +3,7 @@
 ## verdict is inside input.hcj.jsonl (plan §3.0/§3.1).
 import std/[strutils, algorithm]
 import hcj, records, calendars, bars, engine, rest_resp, sub_input, vendor_input,
-       tickwire, subcheck, event_gen
+       tickwire, subcheck, event_gen, backfill
 
 type
   Config* = object
@@ -164,7 +164,12 @@ proc flagOf(raw: HcjValue): string =
   ""
 
 proc barLine*(bar: Bar): string =
-  canonical(hObj(
+  ## The §7 bar line. `origin` is the optional P21 field: emitted ONLY as
+  ## "BACKFILL" on ka10080-derived bars; a LIVE bar (origin == "") emits no
+  ## origin field at all, so pre-contract streams and live-only runs stay
+  ## byte-identical to the old format (the optional-field principle,
+  ## REPLAY_CONTRACT §7).
+  var pairs: seq[HcjPair] = @[
     ("bar_index", hInt(bar.index)),
     ("bar_position", hStr(bar.pos)),
     ("close", hInt(bar.close)),
@@ -181,7 +186,14 @@ proc barLine*(bar: Bar): string =
     ("symbol", hStr(bar.symbol)),
     ("ticks", hInt(bar.ticks)),
     ("vol", hInt(bar.vol)),
-    ("vol_partial", hBool(bar.volPartial))))
+    ("vol_partial", hBool(bar.volPartial))]
+  if bar.origin.len > 0:
+    if bar.origin != backfillOrigin:
+      raise newException(RecordError,
+        "bar origin " & bar.origin & " is outside the declared vocabulary " &
+        "(only " & backfillOrigin & " exists; LIVE is the absent field)")
+    pairs.add(("origin", hStr(bar.origin)))
+  canonical(HcjValue(kind: hkObj, pairs: pairs))
 
 proc signalLine*(s: Signal): string =
   canonical(hObj(
@@ -345,12 +357,32 @@ proc runCore*(recs: seq[Record]): CoreResult =
   # body or chain failure is a contract violation (REJECT, exit 2) and takes
   # precedence over INCOMPLETE, never a silent pass. The declared re-poll
   # cadence and page cap come from the config record (README §6.1); with no
-  # declared cadence the audit stays single-round.
+  # declared cadence the audit stays single-round. Both declared APIs are
+  # audited (ka10027 candidate chains, ka10080 backfill chains).
+  var verified: seq[RestRespAttempt]
   try:
-    result.restVerified = verifyAttempts(restAttempts, result.config.pageCap,
-                                         result.config.repollSeconds).len
+    verified = verifyAttempts(restAttempts, result.config.pageCap,
+                              result.config.repollSeconds)
   except RestRespError as e:
     raise newException(RecordError, restRejection(e.seqNo, e.msg))
+  result.restVerified = verified.len
+  # The ka10080 backfill bars (§12.8/P21): derived from the VERIFIED
+  # preserved rows, origin:"BACKFILL", merged with the live bars at the
+  # sealed output. A derivation failure (row schema, price sanity, session
+  # placement, duplicate interval) is a contract violation with the same
+  # REJECT precedence as the chain audit — an unconfirmed backfill bar is
+  # never silently dropped or passed.
+  var backfill: seq[Bar]
+  try:
+    backfill = backfillBars(verified, result.spec, result.config.sessionDate)
+  except BackfillError as e:
+    raise newException(RecordError,
+      "backfill bars are rejected: " & e.msg &
+      " (ka10080 rows are consumed only as verified 3-minute BACKFILL " &
+      "evidence — never fabricated into live ticks; the cntr_tm interval " &
+      "boundary semantics are UNVERIFIED until the measured demo capture)")
+  except VendorInputError as e:
+    raise newException(RecordError, restRejection(0, e.msg))
   result.regAcks0B = guard.regAckCount0B()
   result.removeAcks0B = guard.removeAckCount0B()
   # The minimum close evidence of a sealed live stream (README §10): a
@@ -380,7 +412,14 @@ proc runCore*(recs: seq[Record]): CoreResult =
     result.status = rsUnreliableFlag
     return
   result.status = rsOk
-  result.bars = closedBars(b)
+  # The sealed output is the LIVE/BACKFILL merge (§12.8): sorted union of
+  # the tick-built bars and the ka10080-derived bars. With no overlap the
+  # merge is byte-stable; an overlap is a REJECT (mergeKeys are P22
+  # session-mode declarations this stream does not carry).
+  try:
+    result.bars = mergeBars(closedBars(b), backfill)
+  except BackfillError as e:
+    raise newException(RecordError, "backfill merge is rejected: " & e.msg)
   var eng = initEngine(result.config.params, result.config.sessionDate)
   for bar in result.bars:
     eng.onBar(bar)
